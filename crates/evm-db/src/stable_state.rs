@@ -1,7 +1,11 @@
 //! どこで: StableBTreeMapの結線 / 何を: accounts/storage/codesの初期化 / なぜ: MemoryId凍結を反映するため
 
 use crate::memory::{get_memory, AppMemoryId, VMem};
-use crate::chain_data::{BlockData, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId, TxIndexEntry};
+use crate::chain_data::{
+    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId,
+    TxIndexEntry,
+};
+use crate::chain_data::constants::CHAIN_ID;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
 use crate::types::values::{AccountVal, CodeVal, U256Val};
 use ic_stable_structures::{StableBTreeMap, StableCell};
@@ -16,6 +20,7 @@ pub type TxStore = StableBTreeMap<TxId, TxEnvelope, VMem>;
 pub type TxIndex = StableBTreeMap<TxId, TxIndexEntry, VMem>;
 pub type Receipts = StableBTreeMap<TxId, ReceiptLike, VMem>;
 pub type Blocks = StableBTreeMap<u64, BlockData, VMem>;
+pub type CallerNonces = StableBTreeMap<CallerKey, u64, VMem>;
 
 pub struct StableState {
     pub accounts: Accounts,
@@ -29,6 +34,8 @@ pub struct StableState {
     pub blocks: Blocks,
     pub queue_meta: StableCell<QueueMeta, VMem>,
     pub head: StableCell<Head, VMem>,
+    pub chain_state: StableCell<ChainStateV1, VMem>,
+    pub caller_nonces: CallerNonces,
 }
 
 thread_local! {
@@ -54,6 +61,11 @@ pub fn init_stable_state() {
             timestamp: 0,
         },
     );
+    let chain_state = StableCell::init(
+        get_memory(AppMemoryId::ChainState),
+        ChainStateV1::new(CHAIN_ID),
+    );
+    let caller_nonces = StableBTreeMap::init(get_memory(AppMemoryId::CallerNonces));
     STABLE_STATE.with(|s| {
         *s.borrow_mut() = Some(StableState {
             accounts,
@@ -67,6 +79,8 @@ pub fn init_stable_state() {
             blocks,
             queue_meta,
             head,
+            chain_state,
+            caller_nonces,
         });
     });
 }

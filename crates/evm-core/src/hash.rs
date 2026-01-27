@@ -16,6 +16,25 @@ pub fn tx_id(tx_bytes: &[u8]) -> [u8; HASH_LEN] {
     keccak256(tx_bytes)
 }
 
+pub fn ic_synthetic_tx_id(
+    chain_id: u64,
+    canister_id: &[u8],
+    caller_principal: &[u8],
+    caller_nonce: u64,
+    payload: &[u8],
+) -> [u8; HASH_LEN] {
+    let payload_hash = keccak256(payload);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"icp-evm:synthetic-tx");
+    buf.push(0x01);
+    buf.extend_from_slice(&chain_id.to_be_bytes());
+    buf.extend_from_slice(canister_id);
+    buf.extend_from_slice(caller_principal);
+    buf.extend_from_slice(&caller_nonce.to_be_bytes());
+    buf.extend_from_slice(&payload_hash);
+    keccak256(&buf)
+}
+
 pub fn tx_list_hash(tx_ids: &[[u8; HASH_LEN]]) -> [u8; HASH_LEN] {
     let mut buf = Vec::with_capacity(1 + tx_ids.len() * HASH_LEN);
     buf.push(0x00);

@@ -18,6 +18,13 @@ pub const RECEIPT_CONTRACT_ADDR_LEN_U32: u32 = 20;
 // ExecResultの返却サイズ制限（HTTP/RPCでの応答肥大化を防ぐ）
 pub const MAX_RETURN_DATA: usize = 32 * 1024;
 
+// Principalは最大29bytesなので、長さ1byte + 29bytesで固定化する
+pub const MAX_PRINCIPAL_LEN: usize = 29;
+pub const CALLER_KEY_LEN: usize = 30;
+
+// StableCellの固定長ヘッダ
+pub const CHAIN_STATE_SIZE_U32: u32 = 40;
+
 pub const BLOCK_BASE_SIZE_U32: u32 = 8 + HASH_LEN_U32 + HASH_LEN_U32 + 8 + HASH_LEN_U32 + HASH_LEN_U32 + 4;
 pub const MAX_BLOCK_DATA_SIZE_U32: u32 = BLOCK_BASE_SIZE_U32 + (HASH_LEN_U32 * MAX_TXS_PER_BLOCK_U32);
 pub const RECEIPT_SIZE_U32: u32 = 32 + 8 + 4 + 1 + 8 + 32 + 1 + RECEIPT_CONTRACT_ADDR_LEN_U32;

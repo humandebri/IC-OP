@@ -1,7 +1,8 @@
 //! どこで: Phase1テスト / 何を: Tx/Block/ReceiptのStorable / なぜ: 互換性のため
 
 use evm_db::chain_data::{
-    BlockData, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind,
+    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId,
+    TxIndexEntry, TxKind,
 };
 use ic_stable_structures::Storable;
 
@@ -78,4 +79,26 @@ fn tx_index_roundtrip() {
     let bytes = entry.to_bytes();
     let decoded = TxIndexEntry::from_bytes(bytes);
     assert_eq!(entry, decoded);
+}
+
+#[test]
+fn chain_state_roundtrip() {
+    let mut state = ChainStateV1::new(4_801_360);
+    state.last_block_number = 10;
+    state.last_block_time = 11;
+    state.auto_mine_enabled = true;
+    state.is_producing = true;
+    state.mining_scheduled = false;
+    state.next_queue_seq = 12;
+    let bytes = state.to_bytes();
+    let decoded = ChainStateV1::from_bytes(bytes);
+    assert_eq!(state, decoded);
+}
+
+#[test]
+fn caller_key_roundtrip() {
+    let key = CallerKey::from_principal_bytes(&[1u8; 5]);
+    let bytes = key.to_bytes();
+    let decoded = CallerKey::from_bytes(bytes);
+    assert_eq!(key, decoded);
 }

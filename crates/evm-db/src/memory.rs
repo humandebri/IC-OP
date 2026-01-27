@@ -23,6 +23,8 @@ pub enum AppMemoryId {
     Receipts = 11,
     Blocks = 12,
     Head = 13,
+    ChainState = 14,
+    CallerNonces = 15,
 }
 
 impl AppMemoryId {
@@ -42,6 +44,8 @@ impl AppMemoryId {
             AppMemoryId::Receipts => 11,
             AppMemoryId::Blocks => 12,
             AppMemoryId::Head => 13,
+            AppMemoryId::ChainState => 14,
+            AppMemoryId::CallerNonces => 15,
         }
     }
 

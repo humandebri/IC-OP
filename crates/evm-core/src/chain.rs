@@ -4,7 +4,8 @@ use crate::hash;
 use crate::revm_exec::execute_tx;
 use crate::state_root::{compute_state_root, compute_state_root_with};
 use crate::tx_decode::decode_tx;
-use evm_db::chain_data::{BlockData, Head, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind};
+use evm_db::chain_data::constants::CHAIN_ID;
+use evm_db::chain_data::{BlockData, CallerKey, Head, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind};
 use evm_db::stable_state::{with_state, with_state_mut};
 use revm::primitives::Address;
 
@@ -40,6 +41,43 @@ pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
         let mut meta = *state.queue_meta.get();
         let index = meta.push();
         state.queue_meta.set(meta);
+        let mut chain_state = *state.chain_state.get();
+        chain_state.next_queue_seq = meta.tail;
+        state.chain_state.set(chain_state);
+        state.queue.insert(index, tx_id);
+        Ok(tx_id)
+    })
+}
+
+pub fn submit_ic_tx(
+    caller_principal: Vec<u8>,
+    canister_id: Vec<u8>,
+    tx_bytes: Vec<u8>,
+) -> Result<TxId, ChainError> {
+    with_state_mut(|state| {
+        let caller_key = CallerKey::from_principal_bytes(&caller_principal);
+        let current_nonce = state.caller_nonces.get(&caller_key).unwrap_or(0);
+        let next_nonce = current_nonce.saturating_add(1);
+        state.caller_nonces.insert(caller_key, next_nonce);
+        let tx_id = TxId(hash::ic_synthetic_tx_id(
+            CHAIN_ID,
+            &canister_id,
+            &caller_principal,
+            current_nonce,
+            &tx_bytes,
+        ));
+        if state.seen_tx.get(&tx_id).is_some() {
+            return Err(ChainError::TxAlreadySeen);
+        }
+        let envelope = TxEnvelope::new(tx_id, TxKind::IcSynthetic, tx_bytes);
+        state.seen_tx.insert(tx_id, 1);
+        state.tx_store.insert(tx_id, envelope);
+        let mut meta = *state.queue_meta.get();
+        let index = meta.push();
+        state.queue_meta.set(meta);
+        let mut chain_state = *state.chain_state.get();
+        chain_state.next_queue_seq = meta.tail;
+        state.chain_state.set(chain_state);
         state.queue.insert(index, tx_id);
         Ok(tx_id)
     })
@@ -119,6 +157,10 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             block_hash,
             timestamp,
         });
+        let mut chain_state = *state.chain_state.get();
+        chain_state.last_block_number = number;
+        chain_state.last_block_time = timestamp;
+        state.chain_state.set(chain_state);
         Ok(block)
     })
 }
@@ -129,8 +171,13 @@ pub fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResult, ChainError> {
     Ok(result)
 }
 
-pub fn execute_ic_tx(caller: [u8; 20], tx_bytes: Vec<u8>) -> Result<ExecResult, ChainError> {
-    let tx_id = submit_tx(TxKind::IcSynthetic, tx_bytes)?;
+pub fn execute_ic_tx(
+    caller: [u8; 20],
+    caller_principal: Vec<u8>,
+    canister_id: Vec<u8>,
+    tx_bytes: Vec<u8>,
+) -> Result<ExecResult, ChainError> {
+    let tx_id = submit_ic_tx(caller_principal, canister_id, tx_bytes)?;
     execute_and_seal_with_caller(tx_id, TxKind::IcSynthetic, caller)
 }
 

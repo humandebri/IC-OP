@@ -85,7 +85,9 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> ExecResultDto {
 #[ic_cdk::update]
 fn execute_ic_tx(tx_bytes: Vec<u8>) -> ExecResultDto {
     let caller = principal_to_evm_address(ic_cdk::api::msg_caller());
-    let result = chain::execute_ic_tx(caller, tx_bytes)
+    let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
+    let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
+    let result = chain::execute_ic_tx(caller, caller_principal, canister_id, tx_bytes)
         .unwrap_or_else(|_| ic_cdk::trap("execute_ic_tx failed"));
     ExecResultDto {
         tx_id: result.tx_id.0.to_vec(),
@@ -106,7 +108,9 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Vec<u8> {
 
 #[ic_cdk::update]
 fn submit_ic_tx(tx_bytes: Vec<u8>) -> Vec<u8> {
-    let tx_id = chain::submit_tx(evm_db::chain_data::TxKind::IcSynthetic, tx_bytes)
+    let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
+    let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
+    let tx_id = chain::submit_ic_tx(caller_principal, canister_id, tx_bytes)
         .unwrap_or_else(|_| ic_cdk::trap("submit_ic_tx failed"));
     tx_id.0.to_vec()
 }

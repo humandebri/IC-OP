@@ -12,4 +12,6 @@ fn chain_data_memory_ids_are_fixed() {
     assert_eq!(AppMemoryId::Receipts.as_u8(), 11);
     assert_eq!(AppMemoryId::Blocks.as_u8(), 12);
     assert_eq!(AppMemoryId::Head.as_u8(), 13);
+    assert_eq!(AppMemoryId::ChainState.as_u8(), 14);
+    assert_eq!(AppMemoryId::CallerNonces.as_u8(), 15);
 }

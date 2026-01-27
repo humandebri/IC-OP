@@ -1,38 +1,35 @@
-type ExecResultDto = record {
-  tx_id: vec nat8;
-  block_number: nat64;
-  tx_index: nat32;
-  status: nat8;
-  gas_used: nat64;
-  return_data: opt vec nat8;
-};
-
 type BlockView = record {
-  number: nat64;
-  parent_hash: vec nat8;
-  block_hash: vec nat8;
-  timestamp: nat64;
-  tx_ids: vec vec nat8;
-  tx_list_hash: vec nat8;
-  state_root: vec nat8;
+  tx_list_hash : blob;
+  block_hash : blob;
+  number : nat64;
+  timestamp : nat64;
+  tx_ids : vec blob;
+  state_root : blob;
+  parent_hash : blob;
 };
-
+type ExecResultDto = record {
+  status : nat8;
+  tx_id : blob;
+  tx_index : nat32;
+  return_data : opt blob;
+  block_number : nat64;
+  gas_used : nat64;
+};
 type ReceiptView = record {
-  tx_id: vec nat8;
-  block_number: nat64;
-  tx_index: nat32;
-  status: nat8;
-  gas_used: nat64;
-  return_data_hash: vec nat8;
-  contract_address: opt vec nat8;
+  status : nat8;
+  tx_id : blob;
+  tx_index : nat32;
+  return_data_hash : blob;
+  block_number : nat64;
+  gas_used : nat64;
+  contract_address : opt blob;
 };
-
-service: {
-  execute_eth_raw_tx: (vec nat8) -> (ExecResultDto);
-  execute_ic_tx: (vec nat8) -> (ExecResultDto);
-  submit_eth_tx: (vec nat8) -> (vec nat8);
-  submit_ic_tx: (vec nat8) -> (vec nat8);
-  produce_block: (nat32) -> (BlockView);
-  get_block: (nat64) -> (opt BlockView) query;
-  get_receipt: (vec nat8) -> (opt ReceiptView) query;
+service : () -> {
+  execute_eth_raw_tx : (blob) -> (ExecResultDto);
+  execute_ic_tx : (blob) -> (ExecResultDto);
+  get_block : (nat64) -> (opt BlockView) query;
+  get_receipt : (blob) -> (opt ReceiptView) query;
+  produce_block : (nat32) -> (BlockView);
+  submit_eth_tx : (blob) -> (blob);
+  submit_ic_tx : (blob) -> (blob);
 }

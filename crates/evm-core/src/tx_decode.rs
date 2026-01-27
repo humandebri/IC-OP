@@ -1,8 +1,8 @@
 //! どこで: Phase1のTxデコード / 何を: IcSyntheticの最小フォーマット / なぜ: 決定的な解釈のため
 
 use alloy_rlp::{Bytes as RlpBytes, Rlp};
-use evm_db::phase1::constants::{CHAIN_ID, MAX_TX_SIZE};
-use evm_db::phase1::TxKind;
+use evm_db::chain_data::constants::{CHAIN_ID, MAX_TX_SIZE};
+use evm_db::chain_data::TxKind;
 use revm::context::TxEnv;
 use revm::precompile::secp256k1::ec_recover_run;
 use revm::primitives::{Address, Bytes, TxKind as RevmTxKind, U256};

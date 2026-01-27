@@ -2,13 +2,21 @@
 
 use candid::{CandidType, Principal};
 use evm_db::meta::init_meta_or_trap;
-use evm_db::phase1::constants::MAX_RETURN_DATA;
-use evm_db::phase1::{BlockData, ReceiptLike, TxId};
+use evm_db::chain_data::constants::MAX_RETURN_DATA;
+use evm_db::chain_data::{BlockData, ReceiptLike, TxId};
 use evm_db::stable_state::init_stable_state;
 use evm_db::upgrade;
 use evm_core::chain;
 use evm_core::hash::keccak256;
 use serde::Deserialize;
+
+#[cfg(target_arch = "wasm32")]
+getrandom::register_custom_getrandom!(always_fail_getrandom);
+
+#[cfg(target_arch = "wasm32")]
+fn always_fail_getrandom(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    Err(getrandom::Error::UNSUPPORTED)
+}
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct ExecResultDto {
@@ -91,14 +99,14 @@ fn execute_ic_tx(tx_bytes: Vec<u8>) -> ExecResultDto {
 
 #[ic_cdk::update]
 fn submit_eth_tx(raw_tx: Vec<u8>) -> Vec<u8> {
-    let tx_id = chain::submit_tx(evm_db::phase1::TxKind::EthSigned, raw_tx)
+    let tx_id = chain::submit_tx(evm_db::chain_data::TxKind::EthSigned, raw_tx)
         .unwrap_or_else(|_| ic_cdk::trap("submit_eth_tx failed"));
     tx_id.0.to_vec()
 }
 
 #[ic_cdk::update]
 fn submit_ic_tx(tx_bytes: Vec<u8>) -> Vec<u8> {
-    let tx_id = chain::submit_tx(evm_db::phase1::TxKind::IcSynthetic, tx_bytes)
+    let tx_id = chain::submit_tx(evm_db::chain_data::TxKind::IcSynthetic, tx_bytes)
         .unwrap_or_else(|_| ic_cdk::trap("submit_ic_tx failed"));
     tx_id.0.to_vec()
 }
@@ -157,10 +165,12 @@ fn clamp_return_data(return_data: Vec<u8>) -> Option<Vec<u8>> {
     Some(return_data)
 }
 
+ic_cdk::export_candid!();
+
 #[cfg(test)]
 mod tests {
     use super::clamp_return_data;
-    use evm_db::phase1::constants::MAX_RETURN_DATA;
+    use evm_db::chain_data::constants::MAX_RETURN_DATA;
 
     #[test]
     fn clamp_return_data_rejects_oversize() {

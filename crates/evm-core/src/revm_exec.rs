@@ -3,8 +3,8 @@
 use crate::hash::keccak256;
 use crate::revm_db::RevmStableDb;
 use crate::tx_decode::DecodeError;
-use evm_db::phase1::constants::CHAIN_ID;
-use evm_db::phase1::{ReceiptLike, TxId, TxIndexEntry};
+use evm_db::chain_data::constants::CHAIN_ID;
+use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry};
 use evm_db::stable_state::with_state_mut;
 use revm::context::{BlockEnv, Context};
 use revm::handler::{ExecuteCommitEvm, ExecuteEvm, MainBuilder};

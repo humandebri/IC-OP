@@ -1,7 +1,7 @@
 //! どこで: StableBTreeMapの結線 / 何を: accounts/storage/codesの初期化 / なぜ: MemoryId凍結を反映するため
 
 use crate::memory::{get_memory, AppMemoryId, VMem};
-use crate::phase1::{BlockData, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId, TxIndexEntry};
+use crate::chain_data::{BlockData, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId, TxIndexEntry};
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
 use crate::types::values::{AccountVal, CodeVal, U256Val};
 use ic_stable_structures::{StableBTreeMap, StableCell};

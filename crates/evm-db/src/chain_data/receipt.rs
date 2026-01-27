@@ -1,7 +1,7 @@
 //! どこで: Phase1のReceipt / 何を: 最小結果の保存 / なぜ: 参照と互換のため
 
-use crate::phase1::constants::{HASH_LEN, RECEIPT_CONTRACT_ADDR_LEN, RECEIPT_SIZE_U32};
-use crate::phase1::tx::TxId;
+use crate::chain_data::constants::{HASH_LEN, RECEIPT_CONTRACT_ADDR_LEN, RECEIPT_SIZE_U32};
+use crate::chain_data::tx::TxId;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;

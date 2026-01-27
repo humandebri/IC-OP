@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 candid = "0.10"
 ic-cdk = "0.18"
 serde = { version = "1", features = ["derive"] }
+getrandom = { version = "0.2", features = ["custom"] }
 
 [dependencies.evm-core]
 path = "../evm-core"

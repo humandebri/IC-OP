@@ -1,6 +1,6 @@
 //! どこで: Phase1のTxモデル / 何を: TxEnvelopeとID / なぜ: 決定性と互換性を固定するため
 
-use crate::phase1::constants::{MAX_TX_SIZE, TX_ID_LEN, TX_ID_LEN_U32, MAX_TX_SIZE_U32};
+use crate::chain_data::constants::{MAX_TX_SIZE, TX_ID_LEN, TX_ID_LEN_U32, MAX_TX_SIZE_U32};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;

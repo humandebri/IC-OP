@@ -1,6 +1,6 @@
 //! どこで: Phase1テスト / 何を: Tx/Block/ReceiptのStorable / なぜ: 互換性のため
 
-use evm_db::phase1::{
+use evm_db::chain_data::{
     BlockData, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind,
 };
 use ic_stable_structures::Storable;

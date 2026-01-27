@@ -4,7 +4,7 @@ use crate::hash;
 use crate::revm_exec::execute_tx;
 use crate::state_root::compute_state_root;
 use crate::tx_decode::decode_tx;
-use evm_db::phase1::{BlockData, Head, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind};
+use evm_db::chain_data::{BlockData, Head, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind};
 use evm_db::stable_state::{with_state, with_state_mut};
 use revm::primitives::Address;
 

@@ -2,6 +2,7 @@
 
 use candid::{CandidType, Principal};
 use evm_db::meta::init_meta_or_trap;
+use evm_db::phase1::constants::MAX_RETURN_DATA;
 use evm_db::phase1::{BlockData, ReceiptLike, TxId};
 use evm_db::stable_state::init_stable_state;
 use evm_db::upgrade;
@@ -16,7 +17,7 @@ pub struct ExecResultDto {
     pub tx_index: u32,
     pub status: u8,
     pub gas_used: u64,
-    pub return_data: Vec<u8>,
+    pub return_data: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -69,7 +70,7 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> ExecResultDto {
         tx_index: result.tx_index,
         status: result.status,
         gas_used: result.gas_used,
-        return_data: result.return_data,
+        return_data: clamp_return_data(result.return_data),
     }
 }
 
@@ -84,7 +85,7 @@ fn execute_ic_tx(tx_bytes: Vec<u8>) -> ExecResultDto {
         tx_index: result.tx_index,
         status: result.status,
         gas_used: result.gas_used,
-        return_data: result.return_data,
+        return_data: clamp_return_data(result.return_data),
     }
 }
 
@@ -146,6 +147,32 @@ fn block_to_view(block: BlockData) -> BlockView {
         tx_ids,
         tx_list_hash: block.tx_list_hash.to_vec(),
         state_root: block.state_root.to_vec(),
+    }
+}
+
+fn clamp_return_data(return_data: Vec<u8>) -> Option<Vec<u8>> {
+    if return_data.len() > MAX_RETURN_DATA {
+        return None;
+    }
+    Some(return_data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_return_data;
+    use evm_db::phase1::constants::MAX_RETURN_DATA;
+
+    #[test]
+    fn clamp_return_data_rejects_oversize() {
+        let data = vec![0u8; MAX_RETURN_DATA + 1];
+        assert_eq!(clamp_return_data(data), None);
+    }
+
+    #[test]
+    fn clamp_return_data_allows_limit() {
+        let data = vec![7u8; MAX_RETURN_DATA];
+        let out = clamp_return_data(data.clone());
+        assert_eq!(out, Some(data));
     }
 }
 

@@ -15,6 +15,9 @@ pub const CHAIN_ID: u64 = 4_801_360;
 pub const RECEIPT_CONTRACT_ADDR_LEN: usize = 20;
 pub const RECEIPT_CONTRACT_ADDR_LEN_U32: u32 = 20;
 
+// ExecResultの返却サイズ制限（HTTP/RPCでの応答肥大化を防ぐ）
+pub const MAX_RETURN_DATA: usize = 32 * 1024;
+
 pub const BLOCK_BASE_SIZE_U32: u32 = 8 + HASH_LEN_U32 + HASH_LEN_U32 + 8 + HASH_LEN_U32 + HASH_LEN_U32 + 4;
 pub const MAX_BLOCK_DATA_SIZE_U32: u32 = BLOCK_BASE_SIZE_U32 + (HASH_LEN_U32 * MAX_TXS_PER_BLOCK_U32);
 pub const RECEIPT_SIZE_U32: u32 = 32 + 8 + 4 + 1 + 8 + 32 + 1 + RECEIPT_CONTRACT_ADDR_LEN_U32;

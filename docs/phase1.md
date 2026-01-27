@@ -40,7 +40,7 @@ ExecResult（最小返却）
 - tx_index
 - status
 - gas_used
-- return_data
+- return_data（大きい場合は None）
 
 挙動：内部で「1txブロック」を作る
 enqueue → run tx → commit → root → block保存 → receipt返す

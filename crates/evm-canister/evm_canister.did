@@ -4,7 +4,7 @@ type ExecResultDto = record {
   tx_index: nat32;
   status: nat8;
   gas_used: nat64;
-  return_data: vec nat8;
+  return_data: opt vec nat8;
 };
 
 type BlockView = record {

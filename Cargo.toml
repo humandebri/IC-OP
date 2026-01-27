@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/evm-db"
+]
+exclude = [
+    "vendor/stable-structures"
+]
+resolver = "2"

@@ -1,0 +1,17 @@
+{
+  "canisters": {
+    "evm_backend": {
+      "candid": "src/evm_backend/evm_backend.did",
+      "package": "evm_backend",
+      "type": "rust"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}

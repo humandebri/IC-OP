@@ -5,7 +5,9 @@ use crate::revm_exec::execute_tx;
 use crate::state_root::{compute_state_root, compute_state_root_with};
 use crate::tx_decode::decode_tx;
 use evm_db::chain_data::constants::CHAIN_ID;
-use evm_db::chain_data::{BlockData, CallerKey, Head, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind};
+use evm_db::chain_data::{
+    BlockData, CallerKey, Head, ReceiptLike, TxEnvelope, TxId, TxIndexEntry, TxKind, TxLoc,
+};
 use evm_db::stable_state::{with_state, with_state_mut};
 use revm::primitives::Address;
 
@@ -41,6 +43,7 @@ pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
         let mut meta = *state.queue_meta.get();
         let index = meta.push();
         state.queue_meta.set(meta);
+        state.tx_locs.insert(tx_id, TxLoc::queued(index));
         let mut chain_state = *state.chain_state.get();
         chain_state.next_queue_seq = meta.tail;
         state.chain_state.set(chain_state);
@@ -75,6 +78,7 @@ pub fn submit_ic_tx(
         let mut meta = *state.queue_meta.get();
         let index = meta.push();
         state.queue_meta.set(meta);
+        state.tx_locs.insert(tx_id, TxLoc::queued(index));
         let mut chain_state = *state.chain_state.get();
         chain_state.next_queue_seq = meta.tail;
         state.chain_state.set(chain_state);
@@ -121,6 +125,8 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         let empty_return_hash = hash::keccak256(&[]);
         let block_hash = hash::block_hash(parent_hash, number, timestamp, tx_list_hash, state_root);
 
+        let mut chain_state = *state.chain_state.get();
+        let effective_gas_price = chain_state.min_gas_price;
         for (index, tx_id) in tx_ids.iter().enumerate() {
             let tx_index = u32::try_from(index).unwrap_or(0);
             state.tx_index.insert(
@@ -136,10 +142,14 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                 tx_index,
                 status: 1,
                 gas_used: 0,
+                effective_gas_price,
                 return_data_hash: empty_return_hash,
+                return_data: Vec::new(),
                 contract_address: None,
+                logs: Vec::new(),
             };
             state.receipts.insert(*tx_id, receipt);
+            state.tx_locs.insert(*tx_id, TxLoc::included(number, tx_index));
         }
 
         let block = BlockData::new(
@@ -157,7 +167,6 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             block_hash,
             timestamp,
         });
-        let mut chain_state = *state.chain_state.get();
         chain_state.last_block_number = number;
         chain_state.last_block_time = timestamp;
         state.chain_state.set(chain_state);
@@ -230,6 +239,9 @@ fn execute_and_seal_with_caller(
             block_hash,
             timestamp,
         });
+        state
+            .tx_locs
+            .insert(tx_id, TxLoc::included(number, outcome.tx_index));
     });
 
     Ok(ExecResult {
@@ -239,5 +251,43 @@ fn execute_and_seal_with_caller(
         status: outcome.receipt.status,
         gas_used: outcome.receipt.gas_used,
         return_data: outcome.return_data,
+    })
+}
+
+pub fn get_tx_loc(tx_id: &TxId) -> Option<TxLoc> {
+    with_state(|state| state.tx_locs.get(tx_id))
+}
+
+pub struct QueueItem {
+    pub seq: u64,
+    pub tx_id: TxId,
+    pub kind: TxKind,
+}
+
+pub struct QueueSnapshot {
+    pub items: Vec<QueueItem>,
+    pub next_cursor: Option<u64>,
+}
+
+pub fn get_queue_snapshot(limit: usize, cursor: Option<u64>) -> QueueSnapshot {
+    with_state(|state| {
+        let start = cursor.unwrap_or_else(|| state.queue_meta.get().head);
+        let mut items = Vec::new();
+        let mut next_cursor = None;
+        for entry in state.queue.range(start..) {
+            if items.len() >= limit {
+                next_cursor = Some(*entry.key());
+                break;
+            }
+            let seq = *entry.key();
+            let tx_id = entry.value();
+            let kind = state
+                .tx_store
+                .get(&tx_id)
+                .map(|e| e.kind)
+                .unwrap_or(TxKind::EthSigned);
+            items.push(QueueItem { seq, tx_id, kind });
+        }
+        QueueSnapshot { items, next_cursor }
     })
 }

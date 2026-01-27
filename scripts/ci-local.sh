@@ -25,6 +25,9 @@ cargo test -p evm-db -p evm-core -p evm-canister
 
 dfx deploy evm_canister
 
+echo "[smoke] set_auto_mine(false)"
+dfx canister call evm_canister set_auto_mine '(false)' >/dev/null
+
 echo "[smoke] get_block(0)"
 dfx canister call evm_canister get_block '(0)' >/dev/null
 
@@ -80,17 +83,16 @@ dfx canister call evm_canister get_receipt "(vec { $TX_ID })" >/dev/null
 echo "[smoke] get_block(1)"
 dfx canister call evm_canister get_block '(1)' >/dev/null
 
-echo "[smoke] submit_eth_tx -> produce_block"
-ETH_TX_HEX="01"
-ETH_TX_ID=$(dfx canister call evm_canister submit_eth_tx "(vec { $(python - <<PY
-tx = bytes.fromhex("$ETH_TX_HEX")
+echo "[smoke] submit_ic_tx -> produce_block"
+SUBMIT_TX_ID=$(dfx canister call evm_canister submit_ic_tx "(vec { $(python - <<PY
+tx = bytes.fromhex("$TX_HEX")
 print('; '.join(str(b) for b in tx))
 PY
 ) })")
 
-ETH_TX_ID_BYTES=$(ETH_TX_ID="$ETH_TX_ID" python - <<'PY'
+SUBMIT_TX_ID_BYTES=$(SUBMIT_TX_ID="$SUBMIT_TX_ID" python - <<'PY'
 import os, re, sys
-text = os.environ.get("ETH_TX_ID", "")
+text = os.environ.get("SUBMIT_TX_ID", "")
 m = re.search(r'blob\s*"([^"]*)"', text)
 if not m:
     sys.exit(1)
@@ -114,5 +116,22 @@ print('; '.join(str(b) for b in out))
 PY
 )
 
-dfx canister call evm_canister produce_block '(1)' >/dev/null
-dfx canister call evm_canister get_receipt "(vec { $ETH_TX_ID_BYTES })" >/dev/null
+echo "[smoke] get_pending(tx_id)"
+dfx canister call evm_canister get_pending "(vec { $SUBMIT_TX_ID_BYTES })" >/dev/null
+
+echo "[smoke] get_queue_snapshot(1)"
+QUEUE_OUT=$(dfx canister call evm_canister get_queue_snapshot '(1, null)' --output json)
+HAS_ITEM=$(QUEUE_OUT="$QUEUE_OUT" python - <<'PY'
+import json, os
+data = json.loads(os.environ.get("QUEUE_OUT", "null"))
+items = data.get("items", [])
+print("1" if isinstance(items, list) and len(items) > 0 else "0")
+PY
+)
+
+if [[ "$HAS_ITEM" == "1" ]]; then
+  dfx canister call evm_canister produce_block '(1)' >/dev/null
+  dfx canister call evm_canister get_receipt "(vec { $SUBMIT_TX_ID_BYTES })" >/dev/null
+else
+  echo "[smoke] queue empty, skipping produce_block"
+fi

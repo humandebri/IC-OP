@@ -1138,6 +1138,7 @@ dependencies = [
  "evm-db",
  "getrandom 0.2.17",
  "ic-cdk",
+ "ic-cdk-timers",
  "serde",
 ]
 

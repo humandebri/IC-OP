@@ -15,21 +15,41 @@ type ExecResultDto = record {
   block_number : nat64;
   gas_used : nat64;
 };
+type LogView = record { data : blob; topics : vec blob; address : blob };
+type PendingStatusView = variant {
+  Queued : record { seq : nat64 };
+  Included : record { tx_index : nat32; block_number : nat64 };
+  Unknown;
+  Dropped : record { code : nat16 };
+};
+type QueueItemView = record { seq : nat64; tx_id : blob; kind : TxKindView };
+type QueueSnapshotView = record {
+  next_cursor : opt nat64;
+  items : vec QueueItemView;
+};
 type ReceiptView = record {
+  effective_gas_price : nat64;
   status : nat8;
   tx_id : blob;
   tx_index : nat32;
   return_data_hash : blob;
+  logs : vec LogView;
+  return_data : opt blob;
   block_number : nat64;
   gas_used : nat64;
   contract_address : opt blob;
 };
+type TxKindView = variant { EthSigned; IcSynthetic };
 service : () -> {
   execute_eth_raw_tx : (blob) -> (ExecResultDto);
   execute_ic_tx : (blob) -> (ExecResultDto);
   get_block : (nat64) -> (opt BlockView) query;
+  get_pending : (blob) -> (PendingStatusView) query;
+  get_queue_snapshot : (nat32, opt nat64) -> (QueueSnapshotView) query;
   get_receipt : (blob) -> (opt ReceiptView) query;
   produce_block : (nat32) -> (BlockView);
+  set_auto_mine : (bool) -> ();
+  set_mining_interval_ms : (nat64) -> ();
   submit_eth_tx : (blob) -> (blob);
   submit_ic_tx : (blob) -> (blob);
 }

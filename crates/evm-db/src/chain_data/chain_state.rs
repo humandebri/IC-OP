@@ -1,6 +1,8 @@
 //! どこで: chain_data のヘッダ状態 / 何を: 固定サイズのStableStateV1 / なぜ: upgrade耐性と最小メタ保持のため
 
-use crate::chain_data::constants::CHAIN_STATE_SIZE_U32;
+use crate::chain_data::constants::{
+    CHAIN_STATE_SIZE_U32, DEFAULT_BASE_FEE, DEFAULT_MINING_INTERVAL_MS, DEFAULT_MIN_GAS_PRICE,
+};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -15,6 +17,9 @@ pub struct ChainStateV1 {
     pub is_producing: bool,
     pub mining_scheduled: bool,
     pub next_queue_seq: u64,
+    pub mining_interval_ms: u64,
+    pub base_fee: u64,
+    pub min_gas_price: u64,
 }
 
 impl ChainStateV1 {
@@ -28,6 +33,9 @@ impl ChainStateV1 {
             is_producing: false,
             mining_scheduled: false,
             next_queue_seq: 0,
+            mining_interval_ms: DEFAULT_MINING_INTERVAL_MS,
+            base_fee: DEFAULT_BASE_FEE,
+            min_gas_price: DEFAULT_MIN_GAS_PRICE,
         }
     }
 
@@ -54,13 +62,16 @@ impl ChainStateV1 {
 
 impl Storable for ChainStateV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 40];
+        let mut out = [0u8; 64];
         out[0..4].copy_from_slice(&self.schema_version.to_be_bytes());
         out[4..12].copy_from_slice(&self.chain_id.to_be_bytes());
         out[12..20].copy_from_slice(&self.last_block_number.to_be_bytes());
         out[20..28].copy_from_slice(&self.last_block_time.to_be_bytes());
         out[28] = self.flags();
         out[32..40].copy_from_slice(&self.next_queue_seq.to_be_bytes());
+        out[40..48].copy_from_slice(&self.mining_interval_ms.to_be_bytes());
+        out[48..56].copy_from_slice(&self.base_fee.to_be_bytes());
+        out[56..64].copy_from_slice(&self.min_gas_price.to_be_bytes());
         Cow::Owned(out.to_vec())
     }
 
@@ -70,7 +81,7 @@ impl Storable for ChainStateV1 {
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
-        if data.len() != 40 {
+        if data.len() != 64 {
             ic_cdk::trap("chain_state: invalid length");
         }
         let mut schema = [0u8; 4];
@@ -84,6 +95,12 @@ impl Storable for ChainStateV1 {
         let flags = data[28];
         let mut next_queue_seq = [0u8; 8];
         next_queue_seq.copy_from_slice(&data[32..40]);
+        let mut mining_interval_ms = [0u8; 8];
+        mining_interval_ms.copy_from_slice(&data[40..48]);
+        let mut base_fee = [0u8; 8];
+        base_fee.copy_from_slice(&data[48..56]);
+        let mut min_gas_price = [0u8; 8];
+        min_gas_price.copy_from_slice(&data[56..64]);
         let mut state = Self {
             schema_version: u32::from_be_bytes(schema),
             chain_id: u64::from_be_bytes(chain_id),
@@ -93,6 +110,9 @@ impl Storable for ChainStateV1 {
             is_producing: false,
             mining_scheduled: false,
             next_queue_seq: u64::from_be_bytes(next_queue_seq),
+            mining_interval_ms: u64::from_be_bytes(mining_interval_ms),
+            base_fee: u64::from_be_bytes(base_fee),
+            min_gas_price: u64::from_be_bytes(min_gas_price),
         };
         state.apply_flags(flags);
         state

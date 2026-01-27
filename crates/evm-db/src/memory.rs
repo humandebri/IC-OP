@@ -25,6 +25,7 @@ pub enum AppMemoryId {
     Head = 13,
     ChainState = 14,
     CallerNonces = 15,
+    TxLocs = 16,
 }
 
 impl AppMemoryId {
@@ -46,6 +47,7 @@ impl AppMemoryId {
             AppMemoryId::Head => 13,
             AppMemoryId::ChainState => 14,
             AppMemoryId::CallerNonces => 15,
+            AppMemoryId::TxLocs => 16,
         }
     }
 

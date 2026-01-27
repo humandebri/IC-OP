@@ -6,6 +6,7 @@ pub mod chain_state;
 pub mod constants;
 pub mod queue;
 pub mod receipt;
+pub mod tx_loc;
 pub mod tx;
 
 pub use block::{BlockData, Head};
@@ -17,4 +18,5 @@ pub use constants::{
 };
 pub use queue::QueueMeta;
 pub use receipt::ReceiptLike;
+pub use tx_loc::{TxLoc, TxLocKind};
 pub use tx::{TxEnvelope, TxId, TxIndexEntry, TxKind};

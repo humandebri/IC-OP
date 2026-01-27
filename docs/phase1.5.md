@@ -6,7 +6,7 @@
 ICPの `time()` をそのまま使うとレプリカ間決定性が揺れる可能性があるので、ブロックの timestamp は **チェーン内部状態だけ** で決める。
 ---
 
-1) 自動ブロック生成（タイマー：イベント駆動・ワンショット推奨）
+1) 自動ブロック生成（タイマー：一定間隔 + キュー非空なら実行）
 1.1 目的
 
 アイドル時コストをほぼゼロにする（heartbeatの“空振り”固定費を避ける）
@@ -17,7 +17,13 @@ ICPの `time()` をそのまま使うとレプリカ間決定性が揺れる可�
 
 ポーリング禁止、1回の起動で最大1ブロック、ガード付き。
 
-トリガー：submit時（enqueue時）
+トリガー：一定間隔タイマー（5秒）
+
+タイマーは「一定間隔で起動するが、キューが空なら何もしない」方式にする。
+空ブロックは作らない。
+
+補助トリガー（任意）：submit時（enqueue時）に schedule_mining() を呼んでも良いが、
+最終的な生成はタイマーに委ねる（重複起動をガードで抑制）。
 
 submit_* が tx をキューに入れた直後に schedule_mining() を呼ぶ
 
@@ -33,7 +39,7 @@ if queue_len == 0 -> return
 
 mining_scheduled = true
 
-ワンショット・タイマーをセット（例：delay=0〜数十ms）
+一定間隔タイマーをセット（delay=5s、運用で変更できるようにconfig化）
 
 タイマーハンドラ
 
@@ -51,7 +57,7 @@ produce_block(max_txs_per_block) を実行
 
 is_producing = false
 
-もし queue_len > 0 なら 再度 schedule_mining()（ただし1回=1ブロック）
+次回タイマーまで待つ（1回=最大1ブロック）
 
 これで「キューがある限り連続で掘る」が、**ループではなく“イベント列”**として進む（1メッセージ=最大1ブロック）。
 
@@ -83,12 +89,12 @@ next_tx_seq: u64
 
 last_produce_attempt: u64（任意）
 
-1.5 “一定間隔チェック”は採用しない（明記）
+1.5 “一定間隔 + 空キュー時スキップ”を採用（明記）
 
-定期ポーリング（1〜2秒ごとチェック）は採用しない
-理由：トランザクションが無い時間でも固定費が出るため
+定期タイマーは採用するが、**キューが空なら必ずスキップ**する。
+これにより「空ブロック連発」と「アイドル時の無駄」を避ける。
 
-遅延は「enqueue → timer → produce」のパスで決まる（通常は極小）
+遅延は「最大5秒 + 実行時間」に抑える。低遅延が必要なら間隔を短くする。
 
 ---
 
@@ -154,7 +160,7 @@ Droppedが無いと “いつまでもQueuedっぽいのに実は消えた” �
 * `logs: Vec<Log { address, topics[], data }>`
 * `return_data`（あなたが言ってた ExecResult 拡張の中核）
 * `contract_address`（create時）
-* `effective_gas_price`（後回し可。Phase1なら0固定でもよいが、仕様に書く）
+* `effective_gas_price`（Phase1は0固定 or min_gas_price を使う。ChainStateに base_fee/min_gas_price を持たせて足場にする）
 
 索引なしで良いので、保存構造は：
 
@@ -230,4 +236,3 @@ Phase2のJSON-RPCは、結局これらの薄いラッパーになる。
 * **stable構造は “追記/バージョニング” 前提で設計**（upgradeで壊さない）
 * `is_producing` は upgrade 中に true のまま死ぬ可能性があるので、`post_upgrade` で false に戻す（仕様にしてよい）
 * `queue_len > 0` 判定と `pop` の間で状態が変わる可能性は、単一スレッドでも `await` があると起こる。なので `produce_block` は基本 `await` なし（または状態機械）
-

@@ -1,8 +1,9 @@
 //! どこで: Phase1テスト / 何を: Tx/Block/ReceiptのStorable / なぜ: 互換性のため
 
+use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{
     BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId,
-    TxIndexEntry, TxKind,
+    TxIndexEntry, TxKind, TxLoc,
 };
 use ic_stable_structures::Storable;
 
@@ -40,8 +41,15 @@ fn receipt_roundtrip() {
         tx_index: 0,
         status: 1,
         gas_used: 21000,
+        effective_gas_price: 0,
         return_data_hash: [0x55u8; 32],
+        return_data: vec![1, 2, 3],
         contract_address: None,
+        logs: vec![LogEntry {
+            address: [0x11u8; 20],
+            topics: vec![[0x22u8; 32]],
+            data: vec![0x33, 0x44],
+        }],
     };
     let bytes = receipt.to_bytes();
     let decoded = ReceiptLike::from_bytes(bytes);
@@ -82,6 +90,14 @@ fn tx_index_roundtrip() {
 }
 
 #[test]
+fn tx_loc_roundtrip() {
+    let loc = TxLoc::queued(42);
+    let bytes = loc.to_bytes();
+    let decoded = TxLoc::from_bytes(bytes);
+    assert_eq!(loc, decoded);
+}
+
+#[test]
 fn chain_state_roundtrip() {
     let mut state = ChainStateV1::new(4_801_360);
     state.last_block_number = 10;
@@ -90,6 +106,7 @@ fn chain_state_roundtrip() {
     state.is_producing = true;
     state.mining_scheduled = false;
     state.next_queue_seq = 12;
+    state.mining_interval_ms = 7_000;
     let bytes = state.to_bytes();
     let decoded = ChainStateV1::from_bytes(bytes);
     assert_eq!(state, decoded);

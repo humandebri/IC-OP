@@ -21,6 +21,7 @@ pub type TxIndex = StableBTreeMap<TxId, TxIndexEntry, VMem>;
 pub type Receipts = StableBTreeMap<TxId, ReceiptLike, VMem>;
 pub type Blocks = StableBTreeMap<u64, BlockData, VMem>;
 pub type CallerNonces = StableBTreeMap<CallerKey, u64, VMem>;
+pub type TxLocs = StableBTreeMap<TxId, crate::chain_data::TxLoc, VMem>;
 
 pub struct StableState {
     pub accounts: Accounts,
@@ -36,6 +37,7 @@ pub struct StableState {
     pub head: StableCell<Head, VMem>,
     pub chain_state: StableCell<ChainStateV1, VMem>,
     pub caller_nonces: CallerNonces,
+    pub tx_locs: TxLocs,
 }
 
 thread_local! {
@@ -66,6 +68,7 @@ pub fn init_stable_state() {
         ChainStateV1::new(CHAIN_ID),
     );
     let caller_nonces = StableBTreeMap::init(get_memory(AppMemoryId::CallerNonces));
+    let tx_locs = StableBTreeMap::init(get_memory(AppMemoryId::TxLocs));
     STABLE_STATE.with(|s| {
         *s.borrow_mut() = Some(StableState {
             accounts,
@@ -81,6 +84,7 @@ pub fn init_stable_state() {
             head,
             chain_state,
             caller_nonces,
+            tx_locs,
         });
     });
 }

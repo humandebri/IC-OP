@@ -4,8 +4,9 @@ use crate::hash::keccak256;
 use crate::revm_db::RevmStableDb;
 use crate::tx_decode::DecodeError;
 use evm_db::chain_data::constants::CHAIN_ID;
+use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry};
-use evm_db::stable_state::with_state_mut;
+use evm_db::stable_state::{with_state, with_state_mut};
 use revm::context::{BlockEnv, Context};
 use revm::handler::{ExecuteCommitEvm, ExecuteEvm, MainBuilder};
 use revm::handler::MainnetContext;
@@ -45,24 +46,43 @@ pub fn execute_tx(
     let state = result.state;
     evm.commit(state);
 
-    let (status, gas_used, output, contract_address) = match result.result {
-        ExecutionResult::Success { gas_used, output, .. } => {
+    let (status, gas_used, output, contract_address, logs) = match result.result {
+        ExecutionResult::Success {
+            gas_used,
+            output,
+            logs,
+            ..
+        } => {
             let addr = output.address().map(|a| address_to_bytes(*a));
-            (1u8, gas_used, output.data().as_ref().to_vec(), addr)
+            let mapped = logs
+                .into_iter()
+                .map(|log| LogEntry {
+                    address: address_to_bytes(log.address),
+                    topics: log.topics().iter().map(|t| t.0).collect(),
+                    data: log.data.data.to_vec(),
+                })
+                .collect::<Vec<_>>();
+            (1u8, gas_used, output.data().as_ref().to_vec(), addr, mapped)
         }
-        ExecutionResult::Revert { gas_used, output } => (0u8, gas_used, output.to_vec(), None),
-        ExecutionResult::Halt { gas_used, .. } => (0u8, gas_used, Vec::new(), None),
+        ExecutionResult::Revert { gas_used, output } => {
+            (0u8, gas_used, output.to_vec(), None, Vec::new())
+        }
+        ExecutionResult::Halt { gas_used, .. } => (0u8, gas_used, Vec::new(), None, Vec::new()),
     };
 
     let return_data_hash = keccak256(&output);
+    let effective_gas_price = with_state(|state| state.chain_state.get().min_gas_price);
     let receipt = ReceiptLike {
         tx_id,
         block_number,
         tx_index,
         status,
         gas_used,
+        effective_gas_price,
         return_data_hash,
+        return_data: output.clone(),
         contract_address,
+        logs,
     };
 
     with_state_mut(|state| {
@@ -73,7 +93,7 @@ pub fn execute_tx(
                 tx_index,
             },
         );
-        state.receipts.insert(tx_id, receipt);
+        state.receipts.insert(tx_id, receipt.clone());
     });
 
     Ok(ExecOutcome {

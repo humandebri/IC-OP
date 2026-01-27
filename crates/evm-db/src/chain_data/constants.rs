@@ -23,8 +23,30 @@ pub const MAX_PRINCIPAL_LEN: usize = 29;
 pub const CALLER_KEY_LEN: usize = 30;
 
 // StableCellの固定長ヘッダ
-pub const CHAIN_STATE_SIZE_U32: u32 = 40;
+pub const CHAIN_STATE_SIZE_U32: u32 = 64;
+
+// 自動ブロック生成の既定間隔（ms）
+pub const DEFAULT_MINING_INTERVAL_MS: u64 = 5_000;
+
+// ガス関連の既定値（Phase1の足場）
+pub const DEFAULT_BASE_FEE: u64 = 0;
+pub const DEFAULT_MIN_GAS_PRICE: u64 = 0;
+
+// TxLocの固定長
+pub const TX_LOC_SIZE_U32: u32 = 24;
+
+// logs/receiptの上限
+pub const MAX_LOGS_PER_TX: usize = 64;
+pub const MAX_LOG_TOPICS: usize = 4;
+pub const MAX_LOG_DATA: usize = 4096;
+pub const MAX_LOG_DATA_U32: u32 = 4096;
+
+// Receiptの最大サイズ（固定部 + 可変部の上限）
+pub const RECEIPT_MAX_SIZE_U32: u32 =
+    32 + 8 + 4 + 1 + 8 + 8 + 4 + (MAX_RETURN_DATA as u32) + 1 + RECEIPT_CONTRACT_ADDR_LEN_U32
+        + 4
+        + (MAX_LOGS_PER_TX as u32)
+            * (20 + 4 + (MAX_LOG_TOPICS as u32) * 32 + 4 + MAX_LOG_DATA_U32);
 
 pub const BLOCK_BASE_SIZE_U32: u32 = 8 + HASH_LEN_U32 + HASH_LEN_U32 + 8 + HASH_LEN_U32 + HASH_LEN_U32 + 4;
 pub const MAX_BLOCK_DATA_SIZE_U32: u32 = BLOCK_BASE_SIZE_U32 + (HASH_LEN_U32 * MAX_TXS_PER_BLOCK_U32);
-pub const RECEIPT_SIZE_U32: u32 = 32 + 8 + 4 + 1 + 8 + 32 + 1 + RECEIPT_CONTRACT_ADDR_LEN_U32;

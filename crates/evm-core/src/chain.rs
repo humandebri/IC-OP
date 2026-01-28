@@ -245,8 +245,16 @@ pub fn get_block(number: u64) -> Option<BlockData> {
     with_state(|state| state.blocks.get(&number))
 }
 
+pub fn get_head_number() -> u64 {
+    with_state(|state| state.head.get().number)
+}
+
 pub fn get_receipt(tx_id: &TxId) -> Option<ReceiptLike> {
     with_state(|state| state.receipts.get(tx_id))
+}
+
+pub fn get_tx_envelope(tx_id: &TxId) -> Option<TxEnvelope> {
+    with_state(|state| state.tx_store.get(tx_id))
 }
 
 fn execute_and_seal(tx_id: TxId, kind: TxKind) -> Result<ExecResult, ChainError> {

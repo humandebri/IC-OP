@@ -7,6 +7,40 @@ type BlockView = record {
   state_root : blob;
   parent_hash : blob;
 };
+type EthBlockView = record {
+  txs : EthTxListView;
+  block_hash : blob;
+  number : nat64;
+  timestamp : nat64;
+  state_root : blob;
+  parent_hash : blob;
+};
+type EthReceiptView = record {
+  effective_gas_price : nat64;
+  status : nat8;
+  tx_index : nat32;
+  logs : vec LogView;
+  block_number : nat64;
+  gas_used : nat64;
+  contract_address : opt blob;
+  tx_hash : blob;
+};
+type EthTxListView = variant { Full : vec EthTxView; Hashes : vec blob };
+type EthTxView = record {
+  to : opt blob;
+  raw : blob;
+  tx_index : opt nat32;
+  value : opt blob;
+  from : opt blob;
+  hash : blob;
+  kind : TxKindView;
+  block_number : opt nat64;
+  chain_id : opt nat64;
+  nonce : opt nat64;
+  gas_limit : opt nat64;
+  input : opt blob;
+  gas_price : opt nat;
+};
 type ExecResultDto = record {
   status : nat8;
   tx_id : blob;
@@ -50,6 +84,12 @@ service : () -> {
   get_queue_snapshot : (nat32, opt nat64) -> (QueueSnapshotView) query;
   get_receipt : (blob) -> (opt ReceiptView) query;
   produce_block : (nat32) -> (BlockView);
+  rpc_eth_block_number : () -> (nat64) query;
+  rpc_eth_chain_id : () -> (nat64) query;
+  rpc_eth_get_block_by_number : (nat64, bool) -> (opt EthBlockView) query;
+  rpc_eth_get_transaction_by_hash : (blob) -> (opt EthTxView) query;
+  rpc_eth_get_transaction_receipt : (blob) -> (opt EthReceiptView) query;
+  rpc_eth_send_raw_transaction : (blob) -> (blob);
   set_auto_mine : (bool) -> ();
   set_mining_interval_ms : (nat64) -> ();
   submit_eth_tx : (blob) -> (blob);

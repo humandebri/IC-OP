@@ -79,6 +79,46 @@ pub fn decode_tx(kind: TxKind, caller: Address, bytes: &[u8]) -> Result<TxEnv, D
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodedTxView {
+    pub from: [u8; 20],
+    pub to: Option<[u8; 20]>,
+    pub nonce: u64,
+    pub value: [u8; 32],
+    pub input: Vec<u8>,
+    pub gas_limit: u64,
+    pub gas_price: u128,
+    pub chain_id: Option<u64>,
+}
+
+pub fn decode_tx_view(
+    kind: TxKind,
+    caller: [u8; 20],
+    bytes: &[u8],
+) -> Result<DecodedTxView, DecodeError> {
+    let tx_env = decode_tx(kind, Address::from(caller), bytes)?;
+    let to = match tx_env.kind {
+        RevmTxKind::Call(addr) => {
+            let mut out = [0u8; 20];
+            out.copy_from_slice(addr.as_ref());
+            Some(out)
+        }
+        RevmTxKind::Create => None,
+    };
+    let mut from = [0u8; 20];
+    from.copy_from_slice(tx_env.caller.as_ref());
+    Ok(DecodedTxView {
+        from,
+        to,
+        nonce: tx_env.nonce,
+        value: tx_env.value.to_be_bytes(),
+        input: tx_env.data.to_vec(),
+        gas_limit: tx_env.gas_limit,
+        gas_price: tx_env.gas_price,
+        chain_id: tx_env.chain_id,
+    })
+}
+
 pub fn decode_eth_raw_tx(bytes: &[u8]) -> Result<TxEnv, DecodeError> {
     if bytes.is_empty() {
         return Err(DecodeError::InvalidLength);

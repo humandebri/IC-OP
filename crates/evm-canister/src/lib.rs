@@ -4,7 +4,8 @@ use candid::{CandidType, Principal};
 use ic_cdk::api::debug_print;
 use evm_db::meta::init_meta_or_trap;
 use evm_db::chain_data::constants::MAX_RETURN_DATA;
-use evm_db::chain_data::{BlockData, ReceiptLike, TxId, TxKind, TxLoc, TxLocKind};
+use evm_db::chain_data::constants::CHAIN_ID;
+use evm_db::chain_data::{BlockData, ReceiptLike, TxEnvelope, TxId, TxKind, TxLoc, TxLocKind};
 use evm_db::stable_state::init_stable_state;
 use evm_db::upgrade;
 use evm_core::chain;
@@ -72,6 +73,51 @@ pub struct QueueItemView {
 pub struct QueueSnapshotView {
     pub items: Vec<QueueItemView>,
     pub next_cursor: Option<u64>,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub enum EthTxListView {
+    Hashes(Vec<Vec<u8>>),
+    Full(Vec<EthTxView>),
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct EthBlockView {
+    pub number: u64,
+    pub parent_hash: Vec<u8>,
+    pub block_hash: Vec<u8>,
+    pub timestamp: u64,
+    pub txs: EthTxListView,
+    pub state_root: Vec<u8>,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct EthTxView {
+    pub hash: Vec<u8>,
+    pub kind: TxKindView,
+    pub raw: Vec<u8>,
+    pub from: Option<Vec<u8>>,
+    pub to: Option<Vec<u8>>,
+    pub nonce: Option<u64>,
+    pub value: Option<Vec<u8>>,
+    pub input: Option<Vec<u8>>,
+    pub gas_limit: Option<u64>,
+    pub gas_price: Option<u128>,
+    pub chain_id: Option<u64>,
+    pub block_number: Option<u64>,
+    pub tx_index: Option<u32>,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct EthReceiptView {
+    pub tx_hash: Vec<u8>,
+    pub block_number: u64,
+    pub tx_index: u32,
+    pub status: u8,
+    pub gas_used: u64,
+    pub effective_gas_price: u64,
+    pub contract_address: Option<Vec<u8>>,
+    pub logs: Vec<LogView>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -193,6 +239,61 @@ fn get_receipt(tx_id: Vec<u8>) -> Option<ReceiptView> {
     buf.copy_from_slice(&tx_id);
     let receipt = chain::get_receipt(&TxId(buf))?;
     Some(receipt_to_view(receipt))
+}
+
+#[ic_cdk::query]
+fn rpc_eth_chain_id() -> u64 {
+    CHAIN_ID
+}
+
+#[ic_cdk::query]
+fn rpc_eth_block_number() -> u64 {
+    chain::get_head_number()
+}
+
+#[ic_cdk::query]
+fn rpc_eth_get_block_by_number(number: u64, full_tx: bool) -> Option<EthBlockView> {
+    let block = chain::get_block(number)?;
+    let txs = if full_tx {
+        let mut list = Vec::with_capacity(block.tx_ids.len());
+        for tx_id in block.tx_ids.iter() {
+            if let Some(view) = tx_to_view(*tx_id) {
+                list.push(view);
+            }
+        }
+        EthTxListView::Full(list)
+    } else {
+        EthTxListView::Hashes(block.tx_ids.iter().map(|id| id.0.to_vec()).collect())
+    };
+    Some(EthBlockView {
+        number: block.number,
+        parent_hash: block.parent_hash.to_vec(),
+        block_hash: block.block_hash.to_vec(),
+        timestamp: block.timestamp,
+        txs,
+        state_root: block.state_root.to_vec(),
+    })
+}
+
+#[ic_cdk::query]
+fn rpc_eth_get_transaction_by_hash(tx_hash: Vec<u8>) -> Option<EthTxView> {
+    let tx_id = tx_id_from_bytes(tx_hash)?;
+    tx_to_view(tx_id)
+}
+
+#[ic_cdk::query]
+fn rpc_eth_get_transaction_receipt(tx_hash: Vec<u8>) -> Option<EthReceiptView> {
+    let tx_id = tx_id_from_bytes(tx_hash)?;
+    let receipt = chain::get_receipt(&tx_id)?;
+    Some(receipt_to_eth_view(receipt))
+}
+
+#[ic_cdk::update]
+fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Vec<u8> {
+    let tx_id = chain::submit_tx(TxKind::EthSigned, raw_tx)
+        .unwrap_or_else(|_| ic_cdk::trap("rpc_eth_send_raw_transaction failed"));
+    schedule_mining();
+    tx_id.0.to_vec()
 }
 
 #[ic_cdk::query]
@@ -321,6 +422,90 @@ fn pending_to_view(loc: Option<TxLoc>) -> PendingStatusView {
     }
 }
 
+fn tx_id_from_bytes(tx_id: Vec<u8>) -> Option<TxId> {
+    if tx_id.len() != 32 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&tx_id);
+    Some(TxId(buf))
+}
+
+fn tx_to_view(tx_id: TxId) -> Option<EthTxView> {
+    let envelope = chain::get_tx_envelope(&tx_id)?;
+    let (block_number, tx_index) = match chain::get_tx_loc(&tx_id) {
+        Some(TxLoc {
+            kind: TxLocKind::Included,
+            block_number,
+            tx_index,
+            ..
+        }) => (Some(block_number), Some(tx_index)),
+        _ => (None, None),
+    };
+    envelope_to_eth_view(envelope, block_number, tx_index)
+}
+
+fn envelope_to_eth_view(
+    envelope: TxEnvelope,
+    block_number: Option<u64>,
+    tx_index: Option<u32>,
+) -> Option<EthTxView> {
+    let mut from = None;
+    let mut to = None;
+    let mut nonce = None;
+    let mut value = None;
+    let mut input = None;
+    let mut gas_limit = None;
+    let mut gas_price = None;
+    let mut chain_id = None;
+
+    let caller = match envelope.kind {
+        TxKind::IcSynthetic => envelope.caller_evm.unwrap_or([0u8; 20]),
+        TxKind::EthSigned => [0u8; 20],
+    };
+    if let Ok(decoded) =
+        evm_core::tx_decode::decode_tx_view(envelope.kind, caller, &envelope.tx_bytes)
+    {
+        from = Some(decoded.from.to_vec());
+        to = decoded.to.map(|addr| addr.to_vec());
+        nonce = Some(decoded.nonce);
+        value = Some(decoded.value.to_vec());
+        input = Some(decoded.input);
+        gas_limit = Some(decoded.gas_limit);
+        gas_price = Some(decoded.gas_price);
+        chain_id = decoded.chain_id;
+    }
+
+    Some(EthTxView {
+        hash: envelope.tx_id.0.to_vec(),
+        kind: tx_kind_to_view(envelope.kind),
+        raw: envelope.tx_bytes,
+        from,
+        to,
+        nonce,
+        value,
+        input,
+        gas_limit,
+        gas_price,
+        chain_id,
+        block_number,
+        tx_index,
+    })
+}
+
+fn receipt_to_eth_view(receipt: ReceiptLike) -> EthReceiptView {
+    EthReceiptView {
+        tx_hash: receipt.tx_id.0.to_vec(),
+        block_number: receipt.block_number,
+        tx_index: receipt.tx_index,
+        status: receipt.status,
+        gas_used: receipt.gas_used,
+        effective_gas_price: receipt.effective_gas_price,
+        contract_address: receipt.contract_address.map(|v| v.to_vec()),
+        logs: receipt.logs.into_iter().map(log_to_view).collect(),
+    }
+}
+
 fn schedule_mining() {
     let interval_ms = evm_db::stable_state::with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
@@ -396,7 +581,7 @@ ic_cdk::export_candid!();
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_return_data;
+    use super::{clamp_return_data, tx_id_from_bytes};
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
 
     #[test]
@@ -410,5 +595,18 @@ mod tests {
         let data = vec![7u8; MAX_RETURN_DATA];
         let out = clamp_return_data(data.clone());
         assert_eq!(out, Some(data));
+    }
+
+    #[test]
+    fn tx_id_from_bytes_rejects_wrong_len() {
+        let out = tx_id_from_bytes(vec![1u8; 31]);
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn tx_id_from_bytes_accepts_32() {
+        let input = vec![9u8; 32];
+        let out = tx_id_from_bytes(input.clone()).expect("tx_id");
+        assert_eq!(out.0.to_vec(), input);
     }
 }

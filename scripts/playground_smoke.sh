@@ -6,6 +6,8 @@ set -euo pipefail
 
 CANISTER_ID="${CANISTER_ID:-mkv5r-3aaaa-aaaab-qabsq-cai}"
 DFX="dfx --network playground"
+USE_DEV_FAUCET="${USE_DEV_FAUCET:-0}"
+DEV_FAUCET_AMOUNT="${DEV_FAUCET_AMOUNT:-1000000000000000000}"
 
 cycle_balance() {
   local label=$1
@@ -40,6 +42,42 @@ print('; '.join(str(b) for b in raw))
 PY
 }
 
+raw_tx_sender_bytes() {
+  python - <<'PY'
+from eth_keys import keys
+private_key = keys.PrivateKey(b"\x01" * 32)
+addr = private_key.public_key.to_canonical_address()
+print('; '.join(str(b) for b in addr))
+PY
+}
+
+parse_blob_bytes() {
+  python - <<'PY'
+import re, sys
+text = sys.stdin.read()
+m = re.search(r'blob\\s*\"([^\"]*)\"', text)
+if not m:
+    sys.exit(1)
+s = m.group(1)
+out = bytearray()
+i = 0
+while i < len(s):
+    if s[i] == '\\\\':
+        if i + 2 < len(s) and all(c in "0123456789abcdefABCDEF" for c in s[i+1:i+3]):
+            out.append(int(s[i+1:i+3], 16))
+            i += 3
+            continue
+        if i + 1 < len(s):
+            esc = s[i+1]
+            out.append(ord(esc))
+            i += 2
+            continue
+    out.append(ord(s[i]))
+    i += 1
+print('; '.join(str(b) for b in out))
+PY
+}
+
 assert_command() {
   bash -c "$1" >/dev/null
 }
@@ -48,11 +86,19 @@ log "starting playground smoke"
 before=$(cycle_balance "before")
 log "triggering ic tx"
 assert_command "$DFX canister call $CANISTER_ID execute_ic_tx \"(vec { 1; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 1; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 7; 161; 32; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 }\")"
+if [[ "$USE_DEV_FAUCET" == "1" ]]; then
+  log "dev_mint for eth sender"
+  SENDER_BYTES=$(raw_tx_sender_bytes)
+  assert_command "$DFX canister call $CANISTER_ID dev_mint \"(vec { $SENDER_BYTES }, $DEV_FAUCET_AMOUNT)\""
+fi
 log "submitting eth raw tx"
 RAW_TX=$(encode_raw_tx)
-assert_command "$DFX canister call $CANISTER_ID submit_eth_tx \"(vec { $RAW_TX })\""
+SUBMIT_ETH_OUT=$($DFX canister call $CANISTER_ID submit_eth_tx "(vec { $RAW_TX })")
+ETH_TX_ID_BYTES=$(echo "$SUBMIT_ETH_OUT" | parse_blob_bytes)
 log "producing block"
 assert_command "$DFX canister call $CANISTER_ID produce_block '(1)'"
+log "fetching receipt for eth tx"
+$DFX canister call "$CANISTER_ID" get_receipt "(vec { $ETH_TX_ID_BYTES })"
 after=$(cycle_balance "after")
 delta=$((before - after))
 log "cycles consumed delta=$delta"

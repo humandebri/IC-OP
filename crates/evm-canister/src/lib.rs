@@ -172,8 +172,10 @@ fn dev_mint(address: Vec<u8>, amount: u128) {
 #[ic_cdk::update]
 fn produce_block(max_txs: u32) -> BlockView {
     let limit = usize::try_from(max_txs).unwrap_or(0);
-    let block = chain::produce_block(limit)
-        .unwrap_or_else(|_| ic_cdk::trap("produce_block failed"));
+    let block = chain::produce_block(limit).unwrap_or_else(|err| {
+        debug_print(format!("produce_block err: {:?}", err));
+        ic_cdk::trap("produce_block failed");
+    });
     block_to_view(block)
 }
 

@@ -3,6 +3,12 @@
     "evm_canister": {
       "candid": "crates/evm-canister/evm_canister.did",
       "package": "evm-canister",
+      "metadata": [
+        {
+          "name": "candid:service",
+          "visibility": "public"
+        }
+      ],
       "type": "rust"
     }
   },

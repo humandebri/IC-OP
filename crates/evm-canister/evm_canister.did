@@ -41,6 +41,7 @@ type ReceiptView = record {
 };
 type TxKindView = variant { EthSigned; IcSynthetic };
 service : () -> {
+  dev_mint : (blob, nat) -> ();
   execute_eth_raw_tx : (blob) -> (ExecResultDto);
   execute_ic_tx : (blob) -> (ExecResultDto);
   get_block : (nat64) -> (opt BlockView) query;

@@ -2,8 +2,8 @@
 
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::chain_data::{
-    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, TxEnvelope, TxId,
-    TxIndexEntry,
+    BlockData, CallerKey, ChainStateV1, Head, MetricsStateV1, QueueMeta, ReceiptLike, TxEnvelope,
+    TxId, TxIndexEntry,
 };
 use crate::chain_data::constants::CHAIN_ID;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
@@ -36,6 +36,7 @@ pub struct StableState {
     pub queue_meta: StableCell<QueueMeta, VMem>,
     pub head: StableCell<Head, VMem>,
     pub chain_state: StableCell<ChainStateV1, VMem>,
+    pub metrics_state: StableCell<MetricsStateV1, VMem>,
     pub caller_nonces: CallerNonces,
     pub tx_locs: TxLocs,
 }
@@ -67,6 +68,7 @@ pub fn init_stable_state() {
         get_memory(AppMemoryId::ChainState),
         ChainStateV1::new(CHAIN_ID),
     );
+    let metrics_state = StableCell::init(get_memory(AppMemoryId::StateAux), MetricsStateV1::new());
     let caller_nonces = StableBTreeMap::init(get_memory(AppMemoryId::CallerNonces));
     let tx_locs = StableBTreeMap::init(get_memory(AppMemoryId::TxLocs));
     STABLE_STATE.with(|s| {
@@ -83,6 +85,7 @@ pub fn init_stable_state() {
             queue_meta,
             head,
             chain_state,
+            metrics_state,
             caller_nonces,
             tx_locs,
         });

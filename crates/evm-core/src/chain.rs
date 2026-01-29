@@ -7,7 +7,9 @@ use crate::tx_decode::decode_tx;
 use evm_db::chain_data::constants::{
     CHAIN_ID, DROP_CODE_CALLER_MISSING, DROP_CODE_DECODE, DROP_CODE_EXEC, DROP_CODE_MISSING,
 };
-use evm_db::chain_data::{BlockData, CallerKey, Head, ReceiptLike, TxEnvelope, TxId, TxKind, TxLoc};
+use evm_db::chain_data::{
+    BlockData, CallerKey, Head, ReceiptLike, TxEnvelope, TxId, TxKind, TxLoc,
+};
 use evm_db::stable_state::{with_state, with_state_mut};
 use evm_db::types::keys::make_account_key;
 use evm_db::types::values::AccountVal;
@@ -45,6 +47,9 @@ pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
         let envelope = TxEnvelope::new(tx_id, kind, tx_bytes);
         state.seen_tx.insert(tx_id, 1);
         state.tx_store.insert(tx_id, envelope);
+        let mut metrics = *state.metrics_state.get();
+        metrics.record_submission(1);
+        state.metrics_state.set(metrics);
         let mut meta = *state.queue_meta.get();
         let index = meta.push();
         state.queue_meta.set(meta);
@@ -81,6 +86,9 @@ pub fn submit_ic_tx(
         let envelope = TxEnvelope::new_with_caller(tx_id, TxKind::IcSynthetic, tx_bytes, caller_evm);
         state.seen_tx.insert(tx_id, 1);
         state.tx_store.insert(tx_id, envelope);
+        let mut metrics = *state.metrics_state.get();
+        metrics.record_submission(1);
+        state.metrics_state.set(metrics);
         let mut meta = *state.queue_meta.get();
         let index = meta.push();
         state.queue_meta.set(meta);
@@ -144,12 +152,15 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
     let parent_hash = head.block_hash;
 
     let mut included: Vec<TxId> = Vec::new();
+    let mut dropped_total = 0u64;
+    let mut dropped_by_code = [0u64; evm_db::chain_data::metrics::DROP_CODE_SLOTS];
     for tx_id in tx_ids {
         let envelope = with_state(|state| state.tx_store.get(&tx_id));
         let envelope = match envelope {
             Some(value) => value,
             None => {
                 with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_MISSING)));
+                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_MISSING);
                 continue;
             }
         };
@@ -160,6 +171,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                     with_state_mut(|state| {
                         state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_CALLER_MISSING));
                     });
+                    track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_CALLER_MISSING);
                     continue;
                 }
             },
@@ -169,6 +181,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             Ok(value) => value,
             Err(_) => {
                 with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
+                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_DECODE);
                 continue;
             }
         };
@@ -177,6 +190,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             Ok(value) => value,
             Err(_) => {
                 with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_EXEC)));
+                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_EXEC);
                 continue;
             }
         };
@@ -187,6 +201,20 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         });
         included.push(tx_id);
     }
+
+    with_state_mut(|state| {
+        let mut metrics = *state.metrics_state.get();
+        for (idx, count) in dropped_by_code.iter().enumerate() {
+            if *count > 0 {
+                metrics.record_drop(idx as u16, *count);
+            }
+        }
+        if !included.is_empty() {
+            metrics.record_included(included.len() as u64);
+            metrics.record_block(number, timestamp, included.len() as u64, dropped_total);
+        }
+        state.metrics_state.set(metrics);
+    });
 
     if included.is_empty() {
         return Err(ChainError::NoExecutableTx);
@@ -303,6 +331,10 @@ fn execute_and_seal_with_caller(
         state
             .tx_locs
             .insert(tx_id, TxLoc::included(number, outcome.tx_index));
+        let mut metrics = *state.metrics_state.get();
+        metrics.record_included(1);
+        metrics.record_block(number, timestamp, 1, 0);
+        state.metrics_state.set(metrics);
     });
 
     Ok(ExecResult {
@@ -351,4 +383,12 @@ pub fn get_queue_snapshot(limit: usize, cursor: Option<u64>) -> QueueSnapshot {
         }
         QueueSnapshot { items, next_cursor }
     })
+}
+
+fn track_drop(total: &mut u64, by_code: &mut [u64], code: u16) {
+    *total = total.saturating_add(1);
+    let idx = usize::from(code);
+    if idx < by_code.len() {
+        by_code[idx] = by_code[idx].saturating_add(1);
+    }
 }

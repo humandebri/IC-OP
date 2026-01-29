@@ -16,6 +16,9 @@
 # rust
 target/
 
+# pocket-ic binary (local)
+crates/evm-rpc-e2e/pocket-ic
+
 # frontend code
 node_modules/
 dist/

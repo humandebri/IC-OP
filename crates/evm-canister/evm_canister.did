@@ -7,6 +7,17 @@ type BlockView = record {
   state_root : blob;
   parent_hash : blob;
 };
+type DecodedTxView = record {
+  to : opt blob;
+  value : blob;
+  from : blob;
+  chain_id : opt nat64;
+  nonce : nat64;
+  gas_limit : nat64;
+  input : blob;
+  gas_price : nat;
+};
+type DropCountView = record { code : nat16; count : nat64 };
 type EthBlockView = record {
   txs : EthTxListView;
   block_hash : blob;
@@ -27,19 +38,13 @@ type EthReceiptView = record {
 };
 type EthTxListView = variant { Full : vec EthTxView; Hashes : vec blob };
 type EthTxView = record {
-  to : opt blob;
   raw : blob;
   tx_index : opt nat32;
-  value : opt blob;
-  from : opt blob;
+  decode_ok : bool;
   hash : blob;
   kind : TxKindView;
   block_number : opt nat64;
-  chain_id : opt nat64;
-  nonce : opt nat64;
-  gas_limit : opt nat64;
-  input : opt blob;
-  gas_price : opt nat;
+  decoded : opt DecodedTxView;
 };
 type ExecResultDto = record {
   status : nat8;
@@ -49,7 +54,29 @@ type ExecResultDto = record {
   block_number : nat64;
   gas_used : nat64;
 };
+type HealthView = record {
+  is_producing : bool;
+  mining_scheduled : bool;
+  tip_hash : blob;
+  tip_number : nat64;
+  last_block_time : nat64;
+  queue_len : nat64;
+  auto_mine_enabled : bool;
+};
 type LogView = record { data : blob; topics : vec blob; address : blob };
+type MetricsView = record {
+  txs : nat64;
+  total_submitted : nat64;
+  window : nat64;
+  avg_txs_per_block : nat64;
+  block_rate_per_sec_x1000 : opt nat64;
+  cycles : nat;
+  total_dropped : nat64;
+  blocks : nat64;
+  drop_counts : vec DropCountView;
+  queue_len : nat64;
+  total_included : nat64;
+};
 type PendingStatusView = variant {
   Queued : record { seq : nat64 };
   Included : record { tx_index : nat32; block_number : nat64 };
@@ -83,6 +110,8 @@ service : () -> {
   get_pending : (blob) -> (PendingStatusView) query;
   get_queue_snapshot : (nat32, opt nat64) -> (QueueSnapshotView) query;
   get_receipt : (blob) -> (opt ReceiptView) query;
+  health : () -> (HealthView) query;
+  metrics : (nat64) -> (MetricsView) query;
   produce_block : (nat32) -> (BlockView);
   rpc_eth_block_number : () -> (nat64) query;
   rpc_eth_chain_id : () -> (nat64) query;

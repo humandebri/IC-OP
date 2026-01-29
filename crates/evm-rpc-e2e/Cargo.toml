@@ -1,0 +1,9 @@
+[package]
+name = "evm-rpc-e2e"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+candid = "0.10"
+pocket-ic = "12.0.0"
+serde = { version = "1", features = ["derive"] }

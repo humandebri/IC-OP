@@ -6,7 +6,7 @@ use evm_db::meta::init_meta_or_trap;
 use evm_db::chain_data::constants::MAX_RETURN_DATA;
 use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::{BlockData, ReceiptLike, TxEnvelope, TxId, TxKind, TxLoc, TxLocKind};
-use evm_db::stable_state::init_stable_state;
+use evm_db::stable_state::{init_stable_state, with_state};
 use evm_db::upgrade;
 use evm_core::chain;
 use evm_core::hash::keccak256;
@@ -76,6 +76,38 @@ pub struct QueueSnapshotView {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct HealthView {
+    pub tip_number: u64,
+    pub tip_hash: Vec<u8>,
+    pub last_block_time: u64,
+    pub queue_len: u64,
+    pub auto_mine_enabled: bool,
+    pub is_producing: bool,
+    pub mining_scheduled: bool,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct DropCountView {
+    pub code: u16,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct MetricsView {
+    pub window: u64,
+    pub blocks: u64,
+    pub txs: u64,
+    pub avg_txs_per_block: u64,
+    pub block_rate_per_sec_x1000: Option<u64>,
+    pub queue_len: u64,
+    pub drop_counts: Vec<DropCountView>,
+    pub total_submitted: u64,
+    pub total_included: u64,
+    pub total_dropped: u64,
+    pub cycles: u128,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub enum EthTxListView {
     Hashes(Vec<Vec<u8>>),
     Full(Vec<EthTxView>),
@@ -96,16 +128,22 @@ pub struct EthTxView {
     pub hash: Vec<u8>,
     pub kind: TxKindView,
     pub raw: Vec<u8>,
-    pub from: Option<Vec<u8>>,
-    pub to: Option<Vec<u8>>,
-    pub nonce: Option<u64>,
-    pub value: Option<Vec<u8>>,
-    pub input: Option<Vec<u8>>,
-    pub gas_limit: Option<u64>,
-    pub gas_price: Option<u128>,
-    pub chain_id: Option<u64>,
+    pub decoded: Option<DecodedTxView>,
+    pub decode_ok: bool,
     pub block_number: Option<u64>,
     pub tx_index: Option<u32>,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct DecodedTxView {
+    pub from: Vec<u8>,
+    pub to: Option<Vec<u8>>,
+    pub nonce: u64,
+    pub value: Vec<u8>,
+    pub input: Vec<u8>,
+    pub gas_limit: u64,
+    pub gas_price: u128,
+    pub chain_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -301,6 +339,54 @@ fn get_cycle_balance() -> u128 {
     ic_cdk::api::canister_cycle_balance()
 }
 
+#[ic_cdk::query]
+fn health() -> HealthView {
+    with_state(|state| {
+        let head = *state.head.get();
+        let chain_state = *state.chain_state.get();
+        let queue_meta = *state.queue_meta.get();
+        HealthView {
+            tip_number: head.number,
+            tip_hash: head.block_hash.to_vec(),
+            last_block_time: chain_state.last_block_time,
+            queue_len: queue_len_from_meta(queue_meta),
+            auto_mine_enabled: chain_state.auto_mine_enabled,
+            is_producing: chain_state.is_producing,
+            mining_scheduled: chain_state.mining_scheduled,
+        }
+    })
+}
+
+#[ic_cdk::query]
+fn metrics(window: u64) -> MetricsView {
+    let cycles = ic_cdk::api::canister_cycle_balance();
+    with_state(|state| {
+        let queue_meta = *state.queue_meta.get();
+        let window = clamp_metrics_window(window);
+        let metrics = *state.metrics_state.get();
+        let summary = metrics.window_summary(window);
+        let rate = summary.block_rate_per_sec_x1000();
+        let avg = if summary.blocks == 0 {
+            0
+        } else {
+            summary.txs / summary.blocks
+        };
+        MetricsView {
+            window,
+            blocks: summary.blocks,
+            txs: summary.txs,
+            avg_txs_per_block: avg,
+            block_rate_per_sec_x1000: rate,
+            queue_len: queue_len_from_meta(queue_meta),
+            drop_counts: collect_drop_counts(&metrics),
+            total_submitted: metrics.total_submitted,
+            total_included: metrics.total_included,
+            total_dropped: metrics.total_dropped,
+            cycles,
+        }
+    })
+}
+
 #[ic_cdk::update]
 fn set_auto_mine(enabled: bool) {
     evm_db::stable_state::with_state_mut(|state| {
@@ -422,6 +508,40 @@ fn pending_to_view(loc: Option<TxLoc>) -> PendingStatusView {
     }
 }
 
+fn queue_len_from_meta(meta: evm_db::chain_data::QueueMeta) -> u64 {
+    meta.tail.saturating_sub(meta.head)
+}
+
+fn clamp_metrics_window(window: u64) -> u64 {
+    const DEFAULT_WINDOW: u64 = 128;
+    const MAX_WINDOW: u64 = 2048;
+    if window == 0 {
+        return DEFAULT_WINDOW;
+    }
+    if window > MAX_WINDOW {
+        return MAX_WINDOW;
+    }
+    window
+}
+
+fn collect_drop_counts(metrics: &evm_db::chain_data::MetricsStateV1) -> Vec<DropCountView> {
+    metrics
+        .drop_counts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, count)| {
+            if *count == 0 {
+                None
+            } else {
+                Some(DropCountView {
+                    code: idx as u16,
+                    count: *count,
+                })
+            }
+        })
+        .collect()
+}
+
 fn tx_id_from_bytes(tx_id: Vec<u8>) -> Option<TxId> {
     if tx_id.len() != 32 {
         return None;
@@ -450,44 +570,33 @@ fn envelope_to_eth_view(
     block_number: Option<u64>,
     tx_index: Option<u32>,
 ) -> Option<EthTxView> {
-    let mut from = None;
-    let mut to = None;
-    let mut nonce = None;
-    let mut value = None;
-    let mut input = None;
-    let mut gas_limit = None;
-    let mut gas_price = None;
-    let mut chain_id = None;
-
     let caller = match envelope.kind {
         TxKind::IcSynthetic => envelope.caller_evm.unwrap_or([0u8; 20]),
         TxKind::EthSigned => [0u8; 20],
     };
-    if let Ok(decoded) =
+    let decoded = if let Ok(decoded) =
         evm_core::tx_decode::decode_tx_view(envelope.kind, caller, &envelope.tx_bytes)
     {
-        from = Some(decoded.from.to_vec());
-        to = decoded.to.map(|addr| addr.to_vec());
-        nonce = Some(decoded.nonce);
-        value = Some(decoded.value.to_vec());
-        input = Some(decoded.input);
-        gas_limit = Some(decoded.gas_limit);
-        gas_price = Some(decoded.gas_price);
-        chain_id = decoded.chain_id;
-    }
+        Some(DecodedTxView {
+            from: decoded.from.to_vec(),
+            to: decoded.to.map(|addr| addr.to_vec()),
+            nonce: decoded.nonce,
+            value: decoded.value.to_vec(),
+            input: decoded.input,
+            gas_limit: decoded.gas_limit,
+            gas_price: decoded.gas_price,
+            chain_id: decoded.chain_id,
+        })
+    } else {
+        None
+    };
 
     Some(EthTxView {
         hash: envelope.tx_id.0.to_vec(),
         kind: tx_kind_to_view(envelope.kind),
         raw: envelope.tx_bytes,
-        from,
-        to,
-        nonce,
-        value,
-        input,
-        gas_limit,
-        gas_price,
-        chain_id,
+        decode_ok: decoded.is_some(),
+        decoded,
         block_number,
         tx_index,
     })
@@ -521,7 +630,7 @@ fn schedule_mining() {
         Some(interval_ms)
     });
     if let Some(interval_ms) = interval_ms {
-        ic_cdk_timers::set_timer(std::time::Duration::from_millis(interval_ms), || {
+        ic_cdk_timers::set_timer(std::time::Duration::from_millis(interval_ms), async move {
             mining_tick();
         });
     }
@@ -609,4 +718,5 @@ mod tests {
         let out = tx_id_from_bytes(input.clone()).expect("tx_id");
         assert_eq!(out.0.to_vec(), input);
     }
+
 }

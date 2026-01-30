@@ -22,7 +22,26 @@ min_priority_fee_per_gas: u128（EIP-1559用、tip下限）
 
 min_gas_price_legacy: u128（legacy用下限）
 
-base_fee_per_gas: u128（Phase1.xは固定でOK。0でもOK）
+base_fee_per_gas: u128（**固定ではなく可変**。0は禁止）
+initial_base_fee_per_gas: u128 = 1_000_000_000（**非0の初期値**。1 gwei）
+elasticity_multiplier: u64 = 2（EIP-1559の目標ガス算出に使用）
+base_fee_max_change_denominator: u64 = 8（EIP-1559の変動上限）
+
+base_fee は「メインネット準備」として **EIP-1559の更新式**を採用する。
+目標ガス: `target_gas = block_gas_limit / elasticity_multiplier`
+更新式（u128でchecked/saturating、除算は切り捨て）:
+```
+if gas_used > target_gas:
+  delta = base_fee_per_gas * (gas_used - target_gas)
+          / target_gas / base_fee_max_change_denominator
+  next_base_fee_per_gas = base_fee_per_gas + delta
+else if gas_used < target_gas:
+  delta = base_fee_per_gas * (target_gas - gas_used)
+          / target_gas / base_fee_max_change_denominator
+  next_base_fee_per_gas = base_fee_per_gas.saturating_sub(delta)
+else:
+  next_base_fee_per_gas = base_fee_per_gas
+```
 
 Tx の “有効ガス単価” を定義：
 
@@ -205,7 +224,7 @@ REVM への反映（ガス代を実際に課金・検証したいなら）
 
 Env.tx.gas_price に effective_gas_price を入れる
 
-BlockEnv.basefee を base_fee_per_gas にする（固定でOK）
+BlockEnv.basefee を base_fee_per_gas にする（可変）
 
 1559 を入れるなら、REVM が basefee を参照して intrinsic / fee周りを整合させるので、“effectiveだけで誤魔化す”より basefeeもセットが安全
 

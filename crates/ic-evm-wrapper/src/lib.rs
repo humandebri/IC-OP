@@ -587,6 +587,16 @@ fn get_cycle_balance() -> u128 {
 }
 
 #[ic_cdk::query]
+fn expected_nonce_by_address(address: Vec<u8>) -> Result<u64, String> {
+    if address.len() != 20 {
+        return Err("address must be 20 bytes".to_string());
+    }
+    let mut buf = [0u8; 20];
+    buf.copy_from_slice(&address);
+    Ok(chain::expected_nonce_for_sender_view(buf))
+}
+
+#[ic_cdk::query]
 fn health() -> HealthView {
     with_state(|state| {
         let head = *state.head.get();

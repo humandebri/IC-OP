@@ -3,6 +3,7 @@
 use alloy_consensus::transaction::RlpEcdsaEncodableTx;
 use alloy_consensus::{SignableTransaction, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+use alloy_primitives::B256;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use std::env;
@@ -85,6 +86,12 @@ fn run() -> Result<(), String> {
     let privkey = privkey.ok_or_else(|| usage())?;
     let signer: PrivateKeySigner = privkey.parse().map_err(|_| "invalid privkey")?;
 
+    if mode == "genkey" {
+        let signer = PrivateKeySigner::random();
+        print_hex(signer.to_bytes());
+        return Ok(());
+    }
+
     if mode == "sender" || mode == "sender-hex" {
         let sender = signer.address();
         if mode == "sender-hex" {
@@ -124,6 +131,13 @@ fn run() -> Result<(), String> {
     tx.rlp_encode_signed(&signature, &mut out);
     print_bytes(&out);
     Ok(())
+}
+
+fn print_hex(bytes: B256) {
+    for b in bytes.as_slice() {
+        print!("{b:02x}");
+    }
+    println!();
 }
 
 fn print_bytes(bytes: &[u8]) {

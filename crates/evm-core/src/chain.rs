@@ -208,6 +208,17 @@ pub fn dev_mint(address: [u8; 20], amount: u128) -> Result<(), ChainError> {
     })
 }
 
+pub fn expected_nonce_for_sender_view(sender: [u8; 20]) -> u64 {
+    with_state(|state| {
+        let sender_key = SenderKey::new(sender);
+        if let Some(value) = state.sender_expected_nonce.get(&sender_key) {
+            return value;
+        }
+        let key = make_account_key(sender);
+        state.accounts.get(&key).map(|value| value.nonce()).unwrap_or(0)
+    })
+}
+
 pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
     if max_txs == 0 {
         return Err(ChainError::InvalidLimit);

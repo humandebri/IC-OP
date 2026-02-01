@@ -35,6 +35,12 @@ install_wasm() {
     exit 1
   fi
   log "wasm size: $(ls -lh "${wasm_path}" | awk '{print $5}')"
+  local wasm_out="target/wasm32-unknown-unknown/release/ic_evm_wrapper.candid.wasm"
+  if ! command -v ic-wasm >/dev/null 2>&1; then
+    log "installing ic-wasm"
+    cargo install ic-wasm --locked
+  fi
+  ic-wasm "${wasm_path}" -o "${wasm_out}" metadata candid:service -f crates/ic-evm-wrapper/evm_canister.did
 
   if [[ "${NETWORK}" == "playground" || "${NETWORK}" == "ic" ]]; then
     if [[ -z "${CANISTER_ID}" ]]; then
@@ -42,10 +48,22 @@ install_wasm() {
       exit 1
     fi
     log "install wasm to canister_id=${CANISTER_ID} mode=${MODE}"
-    ${DFX} install -y --mode "${MODE}" --wasm "${wasm_path}" "${CANISTER_ID}"
+    echo "This will ${MODE} the canister ${CANISTER_ID}. Type YES to continue:"
+    read -r confirm
+    if [[ "${confirm}" != "YES" ]]; then
+      log "aborted"
+      exit 1
+    fi
+    ${DFX} install --mode "${MODE}" --wasm "${wasm_out}" "${CANISTER_ID}"
   else
     log "install wasm to canister_name=${CANISTER_NAME} mode=${MODE}"
-    ${DFX} install -y --mode "${MODE}" --wasm "${wasm_path}" "${CANISTER_NAME}"
+    echo "This will ${MODE} the canister ${CANISTER_NAME}. Type YES to continue:"
+    read -r confirm
+    if [[ "${confirm}" != "YES" ]]; then
+      log "aborted"
+      exit 1
+    fi
+    ${DFX} install --mode "${MODE}" --wasm "${wasm_out}" "${CANISTER_NAME}"
   fi
 }
 

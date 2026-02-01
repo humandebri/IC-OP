@@ -452,3 +452,178 @@ cursor: opt Cursor
 **Step 5: prune デーモン有効化**  
 * `estimated_kept_bytes / stable_pages / last_prune_at` を監視  
 * `max_ops_per_tick` を小さく始めて徐々に上げる
+
+
+チェーンの正しさは canister 側、外部はキャッシュ（再構築可能）を徹底します。
+
+全体方針
+
+canister：canonical（ブロック生成・実行・最小履歴・export API・pruning）
+
+indexer：pull型で export を吸い上げるだけ（落ちてもチェーンは進む）
+
+保存：
+
+検索用インデックス → SQLite（薄く）
+
+生データ（payload） → Contabo Object Storage（zstd圧縮）
+
+成長したら：インデックスを PostgreSQL に移す（rawはObject Storageのまま）
+
+Phase 0: インフラ土台（1日）
+0.1 Contabo VM
+
+目安：4 vCPU / 8–16GB RAM / 1TB NVMe（まずは1台）
+
+セキュリティ：SSH鍵、UFW、fail2ban、DBは外部公開しない
+
+0.2 Object Storage（EU 1TBとか）
+
+使い方：日次アーカイブ or ブロック範囲アーカイブを置く（DB用途ではない）
+
+“ファイル名規則”を決める（例：chain=<id>/day=YYYY-MM-DD/part=0001.zst）
+
+Phase 1: Indexer v1（SQLite + Archive）（2〜4日）
+1.1 プロセス構成
+
+indexer（単一プロセスでOK）
+
+ループ：export_blocks(cursor, max_bytes) を呼ぶ
+
+受け取った chunks を連結して segment payload を復元
+
+payload をあなたの indexer-v1.md の仕様で decode
+
+SQLite に “薄いインデックス” を upsert
+
+raw payload は zstd 圧縮して一旦ローカルに書いて、まとめて Object Storage に upload
+
+1.2 SQLite “最小スキーマ”（容量を抑える）
+
+入れるものだけ決める（最初はこれで十分）：
+
+meta
+
+key TEXT PRIMARY KEY, value BLOB/TEXT
+
+cursor（最重要）、schema_version、last_head、last_ingest_at
+
+blocks
+
+number INTEGER PRIMARY KEY
+
+hash BLOB(32), ts INTEGER, tx_count INTEGER
+
+txs
+
+tx_hash BLOB(32) PRIMARY KEY
+
+block_number INTEGER, tx_index INTEGER
+
+from BLOB(20), to BLOB(20) NULL
+
+status INTEGER, gas_used INTEGER（最小）
+
+archive_parts
+
+block_from INTEGER, block_to INTEGER
+
+object_key TEXT, codec TEXT, size_bytes INTEGER, sha256 BLOB(32)
+
+どのrawがどこにあるかの索引
+
+logsは最初入れない（必要になったら “特定address/topic0だけ” のテーブルを追加）。
+
+1.3 SQLite運用設定（最低限）
+
+WALモード、定期checkpoint
+
+取り込みはトランザクションでまとめる（例：Nブロック単位）
+
+インデックスは最小限（txs(block_number)、txs(from)、必要ならtxs(to)くらい）
+
+1.4 再開・冪等
+
+cursor はコミット後に更新（SQLiteトランザクションと同じタイミング）
+
+同じブロックを再取り込みしても UPSERT で壊れない
+
+Phase 2: 可観測性（半日〜1日）
+
+最低限これだけは出す（stdout→ログでもよい）：
+
+ingest_blocks_per_min
+
+cursor_lag = head - cursor.block_number
+
+raw_bytes/day, zstd_bytes/day, sqlite_growth/day
+
+エラー分類：Pruned, InvalidCursor, Network, Decode
+
+これで「容量見積もり」と「追いついてるか」が数値で確定する。
+
+Phase 3: Pruning の有効化準備（1〜2日）
+
+あなたはすでに canister 側の BlobStore / Quarantine/Free を作ってるので、外部DBに依存しない形で進める：
+
+3.1 Prune方針（外部に左右されない）
+
+通常：retain_days と target_bytes で prune する
+
+ただし運用安心のために emergency を分ける
+
+high_water 超えたら prune tick
+
+hard_emergency 超えたら aggressive prune（止まるよりマシ）
+
+3.2 “外部ACKを必須にしない” 代わりにやること
+
+indexerが死んでてもチェーンは進む
+
+ただし「履歴が外に無い期間」が出る可能性は受け入れる
+
+その代わり、Object Storageへのアーカイブが回ってるかだけ監視（これが現実的）
+
+Phase 4: Explorer/API（必要になったタイミングで）
+
+最初は indexer VM 上で軽いHTTP（読み取り専用）を出す
+
+UIで必要なクエリは SQLite でも余裕で回ることが多い
+
+Phase 5: Postgresへ昇格（必要条件が揃ったら）
+
+「いつ Postgres にする？」のトリガは性能じゃなく運用要件：
+
+Explorerを公開して同時アクセスが増えた
+
+分析クエリが増え、JOIN/集計が重くなった
+
+indexer/workerを複数にしたい
+
+バックアップや運用をちゃんとやる覚悟が固まった
+
+昇格手順（破壊しない）
+
+rawはObject Storage継続（DBに入れない）
+
+SQLite → Postgres に “インデックスだけ” 移行
+
+indexerの書き込み先を Postgres に切り替え（cursorは同じ）
+
+期限感の目安（雑に）
+
+Phase 0〜2：1週間以内に「動く・追いつく・容量が見える」
+
+Phase 3：数日で prune を安全にON（ただし最初は弱く）
+
+Phase 5：必要になったら（最初からやらない）
+
+最初に決め打ちしておくべき“固定値”
+
+max_bytes（export取得上限）：1〜1.5MiB
+
+圧縮：zstd（レベルは低めでOK、まず速度優先）
+
+アーカイブ粒度：まずは 日次（後でブロック範囲にしてもよい）
+
+SQLite保持期間：インデックスは30〜90日、rawはObject Storageで長期

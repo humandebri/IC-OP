@@ -23,7 +23,35 @@ dfx start --clean --background
 
 cargo test -p evm-db -p ic-evm-core -p ic-evm-wrapper
 
-dfx deploy evm_canister
+dfx canister create evm_canister
+echo "[build] ic-evm-wrapper with dev-faucet"
+cargo build --target wasm32-unknown-unknown --release -p ic-evm-wrapper --features dev-faucet --locked
+if ! command -v ic-wasm >/dev/null 2>&1; then
+  echo "[build] installing ic-wasm"
+  cargo install ic-wasm --locked
+fi
+WASM_IN=target/wasm32-unknown-unknown/release/ic_evm_wrapper.wasm
+WASM_OUT=target/wasm32-unknown-unknown/release/ic_evm_wrapper.candid.wasm
+ic-wasm "$WASM_IN" -o "$WASM_OUT" metadata candid:service -f crates/ic-evm-wrapper/evm_canister.did
+dfx canister install evm_canister --wasm "$WASM_OUT"
+
+echo "[smoke] wait for replica"
+for i in {1..10}; do
+  if dfx canister call evm_canister health --output json >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+echo "[smoke] dev_mint caller"
+CALLER_PRINCIPAL=$(dfx identity get-principal)
+CALLER_HEX=$(cargo run -q -p ic-evm-core --bin caller_evm -- "$CALLER_PRINCIPAL")
+CALLER_BLOB=$(python - <<PY
+data = bytes.fromhex("$CALLER_HEX")
+print(''.join(f'\\\\{b:02x}' for b in data))
+PY
+)
+dfx canister call evm_canister dev_mint "(blob \"$CALLER_BLOB\", 1000000000000000000:nat)" >/dev/null
 
 echo "[smoke] set_auto_mine(false)"
 dfx canister call evm_canister set_auto_mine '(false)' >/dev/null
@@ -43,10 +71,24 @@ PY
 )
 TX_HEX=$(python - <<'PY'
 version = b'\x02'
-to = bytes.fromhex('0000000000000000000000000000000000000001')
+to = bytes.fromhex('0000000000000000000000000000000000000010')
 value = (0).to_bytes(32, 'big')
 gas = (500000).to_bytes(8, 'big')
 nonce = (0).to_bytes(8, 'big')
+max_fee = (2_000_000_000).to_bytes(16, 'big')
+max_priority = (1_000_000_000).to_bytes(16, 'big')
+data = b''
+data_len = len(data).to_bytes(4, 'big')
+tx = version + to + value + gas + nonce + max_fee + max_priority + data_len + data
+print(tx.hex())
+PY
+)
+TX_HEX_1=$(python - <<'PY'
+version = b'\x02'
+to = bytes.fromhex('0000000000000000000000000000000000000010')
+value = (0).to_bytes(32, 'big')
+gas = (500000).to_bytes(8, 'big')
+nonce = (1).to_bytes(8, 'big')
 max_fee = (2_000_000_000).to_bytes(16, 'big')
 max_priority = (1_000_000_000).to_bytes(16, 'big')
 data = b''
@@ -78,6 +120,7 @@ PY
 )
 echo "[smoke] execute_ic_tx cycles_used=${EXEC_COST}"
 
+set +e
 TX_ID=$(EXEC_OUT="$EXEC_OUT" python - <<'PY'
 import os, re, sys
 text = os.environ.get("EXEC_OUT", "")
@@ -109,6 +152,17 @@ while i < len(s):
 print('; '.join(str(b) for b in out))
 PY
 )
+EXEC_STATUS=$?
+set -e
+if [[ "$EXEC_STATUS" -ne 0 ]]; then
+  echo "[smoke] execute_ic_tx failed, dumping health/metrics"
+  dfx canister call evm_canister health --output json || true
+  dfx canister call evm_canister metrics '(60)' --output json || true
+  dfx canister call evm_canister get_block '(0)' --output json || true
+  dfx canister call evm_canister get_block '(1)' --output json || true
+  dfx canister call evm_canister get_queue_snapshot '(5, null)' --output json || true
+  exit 1
+fi
 
 echo "[smoke] get_receipt(tx_id)"
 dfx canister call evm_canister get_receipt "(vec { $TX_ID })" >/dev/null
@@ -118,7 +172,7 @@ dfx canister call evm_canister get_block '(1)' >/dev/null
 
 echo "[smoke] submit_ic_tx -> produce_block"
 SUBMIT_TX_ID=$(dfx canister call evm_canister submit_ic_tx "(vec { $(python - <<PY
-tx = bytes.fromhex("$TX_HEX")
+tx = bytes.fromhex("$TX_HEX_1")
 print('; '.join(str(b) for b in tx))
 PY
 ) })")

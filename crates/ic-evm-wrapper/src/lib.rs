@@ -269,8 +269,10 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> 
         Err(chain::ChainError::NonceConflict) => {
             return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
         }
-        Err(chain::ChainError::ExecFailed(_)) => {
-            return Err(ExecuteTxError::Rejected("execution failed".to_string()));
+        Err(chain::ChainError::ExecFailed(err)) => {
+            debug_print(format!("execute_ic_tx exec_failed: {:?}", err));
+            let detail = format!("execution failed: {:?}", err);
+            return Err(ExecuteTxError::Rejected(detail));
         }
         Err(err) => {
             debug_print(format!("execute_eth_raw_tx err: {:?}", err));

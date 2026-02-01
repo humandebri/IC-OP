@@ -8,7 +8,7 @@ use crate::tx_submit;
 use crate::tx_decode::decode_tx;
 use evm_db::chain_data::constants::{
     DEFAULT_BLOCK_GAS_LIMIT, DROP_CODE_CALLER_MISSING, DROP_CODE_DECODE, DROP_CODE_MISSING,
-    DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE,
+    DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE,
 };
 use evm_db::chain_data::{
     BlockData, Head, RawTx, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey,
@@ -448,8 +448,14 @@ fn execute_and_seal_with_caller(
     let sender_bytes = address_to_bytes(tx_env.caller);
     let sender_nonce = tx_env.nonce;
 
-    let outcome = execute_tx(tx_id, 0, tx_env, number, timestamp)
-        .map_err(|err| ChainError::ExecFailed(Some(err)))?;
+    let outcome = match execute_tx(tx_id, 0, tx_env, number, timestamp) {
+        Ok(value) => value,
+        Err(err) => {
+            let sender_key = SenderKey::new(sender_bytes);
+            with_state_mut(|state| drop_exec_pending(state, tx_id, sender_key));
+            return Err(ChainError::ExecFailed(Some(err)));
+        }
+    };
 
     let tx_list_hash = hash::tx_list_hash(&[tx_id.0]);
     let block_hash = hash::block_hash(parent_hash, number, timestamp, tx_list_hash, compute_state_root());
@@ -757,6 +763,18 @@ fn drop_invalid_fee_pending_decode(
         metrics.record_drop(DROP_CODE_DECODE, 1);
         state.metrics_state.set(metrics);
     }
+}
+
+fn drop_exec_pending(state: &mut evm_db::stable_state::StableState, tx_id: TxId, sender: SenderKey) {
+    remove_ready_by_tx_id(state, tx_id);
+    if let Some(pending_key) = state.pending_meta_by_tx_id.remove(&tx_id) {
+        state.pending_by_sender_nonce.remove(&pending_key);
+    }
+    finalize_pending_for_sender(state, sender, tx_id);
+    state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_EXEC));
+    let mut metrics = *state.metrics_state.get();
+    metrics.record_drop(DROP_CODE_EXEC, 1);
+    state.metrics_state.set(metrics);
 }
 
 fn next_pending_for_sender(

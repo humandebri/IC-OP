@@ -14,11 +14,13 @@ use evm_db::chain_data::{
     BlockData, Head, RawTx, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey,
     StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
-use evm_db::stable_state::{with_state, with_state_mut};
+use evm_db::stable_state::{with_state, with_state_mut, StableState};
 use evm_db::types::keys::make_account_key;
 use evm_db::types::values::AccountVal;
+use ic_stable_structures::Storable;
 use revm::primitives::Address;
 use revm::primitives::U256;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChainError {
@@ -325,13 +327,13 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                     contract_address: None,
                     logs: Vec::new(),
                 };
-                with_state_mut(|state| {
-                    state
-                        .tx_index
-                        .insert(tx_id, TxIndexEntry { block_number: number, tx_index });
-                    state.receipts.insert(tx_id, receipt);
-                    state.tx_locs.insert(tx_id, TxLoc::included(number, tx_index));
-                });
+        with_state_mut(|state| {
+            let tx_index_ptr = store_tx_index_entry(state, TxIndexEntry { block_number: number, tx_index });
+            let receipt_ptr = store_receipt(state, &receipt);
+            state.tx_index.insert(tx_id, tx_index_ptr);
+            state.receipts.insert(tx_id, receipt_ptr);
+            state.tx_locs.insert(tx_id, TxLoc::included(number, tx_index));
+        });
                 included.push(tx_id);
                 with_state_mut(|state| {
                     advance_sender_after_tx(state, tx_id, Some(sender_bytes), Some(sender_nonce))
@@ -387,7 +389,8 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
     );
 
     with_state_mut(|state| {
-        state.blocks.insert(number, block.clone());
+        let block_ptr = store_block(state, &block);
+        state.blocks.insert(number, block_ptr);
         state.head.set(Head {
             number,
             block_hash,
@@ -421,7 +424,7 @@ pub fn execute_ic_tx(
 }
 
 pub fn get_block(number: u64) -> Option<BlockData> {
-    with_state(|state| state.blocks.get(&number))
+    with_state(|state| load_block(state, number))
 }
 
 pub fn get_head_number() -> u64 {
@@ -429,7 +432,50 @@ pub fn get_head_number() -> u64 {
 }
 
 pub fn get_receipt(tx_id: &TxId) -> Option<ReceiptLike> {
-    with_state(|state| state.receipts.get(tx_id))
+    with_state(|state| load_receipt(state, tx_id))
+}
+
+fn store_block(state: &mut StableState, block: &BlockData) -> evm_db::blob_ptr::BlobPtr {
+    let bytes = block.to_bytes().into_owned();
+    state
+        .blob_store
+        .store_bytes(&bytes)
+        .unwrap_or_else(|_| panic!("blob_store: store_block failed"))
+}
+
+fn store_receipt(state: &mut StableState, receipt: &ReceiptLike) -> evm_db::blob_ptr::BlobPtr {
+    let bytes = receipt.to_bytes().into_owned();
+    state
+        .blob_store
+        .store_bytes(&bytes)
+        .unwrap_or_else(|_| panic!("blob_store: store_receipt failed"))
+}
+
+fn store_tx_index_entry(
+    state: &mut StableState,
+    entry: TxIndexEntry,
+) -> evm_db::blob_ptr::BlobPtr {
+    let bytes = entry.to_bytes().into_owned();
+    state
+        .blob_store
+        .store_bytes(&bytes)
+        .unwrap_or_else(|_| panic!("blob_store: store_tx_index failed"))
+}
+
+fn load_block(state: &StableState, number: u64) -> Option<BlockData> {
+    if let Some(ptr) = state.blocks.get(&number) {
+        let bytes = state.blob_store.read(&ptr).ok()?;
+        return Some(BlockData::from_bytes(Cow::Owned(bytes)));
+    }
+    None
+}
+
+fn load_receipt(state: &StableState, tx_id: &TxId) -> Option<ReceiptLike> {
+    if let Some(ptr) = state.receipts.get(tx_id) {
+        let bytes = state.blob_store.read(&ptr).ok()?;
+        return Some(ReceiptLike::from_bytes(Cow::Owned(bytes)));
+    }
+    None
 }
 
 pub fn get_tx_envelope(tx_id: &TxId) -> Option<StoredTxBytes> {
@@ -482,7 +528,8 @@ fn execute_and_seal_with_caller(
     );
 
     with_state_mut(|state| {
-        state.blocks.insert(number, block.clone());
+        let block_ptr = store_block(state, &block);
+        state.blocks.insert(number, block_ptr);
         state.head.set(Head {
             number,
             block_hash,
@@ -552,7 +599,7 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
         let mut ops_used: u64 = 0;
         let max_ops = u64::from(max_ops);
         while next <= prune_before {
-            let block = match state.blocks.get(&next) {
+            let block = match load_block(state, next) {
                 Some(value) => value,
                 None => {
                     prune_state.set_pruned_before(next);
@@ -565,7 +612,7 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
             if ops_used.saturating_add(needed) > max_ops {
                 break;
             }
-            let block = state.blocks.remove(&next).unwrap_or(block);
+            let _ = state.blocks.remove(&next);
             for tx_id in block.tx_ids.iter() {
                 state.receipts.remove(tx_id);
                 state.tx_index.remove(tx_id);

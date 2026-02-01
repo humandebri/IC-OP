@@ -392,3 +392,36 @@ cursor: opt Cursor
 
 次に決めるべき設計軸は「logs のクエリ形」。  
 `address + topic` の検索パターンが固まると、index 設計まで一気に決まる。
+
+---
+
+## 9) おすすめの実装順（現実に事故らない）
+
+**Step 0: 保存基盤の固定（prune なし）**  
+* BlobStore + alloc_table + free list を **通常保存の基盤**として先に導入  
+* prune はまだしない（free() をほぼ使わなくても OK）  
+* 目的は **再利用可能な器**を先に作ること
+
+**Step 1: export API（cursor/chunk）実装**  
+* 固定した Cursor / Chunk 仕様どおりに pull API を提供  
+* **外部へ逃がす道**を先に用意する
+
+**Step 2: indexer ワーカー + Supabase 格納**  
+* export() を回して `next_cursor` で追従  
+* DB には **冪等（UPSERT）**で書き込む  
+* ここが安定しない限り prune は禁止
+
+**Step 3: prune ガードを入れる（超重要）**  
+最低限どちらかは必須:
+* **ack 方式（推奨）**: `exported_before_block` を indexer が更新  
+  * prune は `<= exported_before_block` までしか進めない  
+* **手動フラグ方式（簡易）**: `pruning_enabled=false` を運用で明示的に ON
+
+**Step 4: prune 実装（手動/テスト）**  
+* `prune_blocks()` を完成させる  
+  * Quarantine / 2-phase を含める  
+* まだデーモンは有効化しない（`pruning_enabled=false`）
+
+**Step 5: prune デーモン有効化**  
+* `estimated_kept_bytes / stable_pages / last_prune_at` を監視  
+* `max_ops_per_tick` を小さく始めて徐々に上げる

@@ -34,6 +34,13 @@ pub enum AppMemoryId {
     PendingMetaByTxId = 22,
     SenderExpectedNonce = 23,
     PendingCurrentBySender = 24,
+    BlocksPtr = 25,
+    ReceiptsPtr = 26,
+    TxIndexPtr = 27,
+    BlobArena = 28,
+    BlobArenaMeta = 29,
+    BlobAllocTable = 30,
+    BlobFreeList = 31,
 }
 
 impl AppMemoryId {
@@ -64,6 +71,13 @@ impl AppMemoryId {
             AppMemoryId::PendingMetaByTxId => 22,
             AppMemoryId::SenderExpectedNonce => 23,
             AppMemoryId::PendingCurrentBySender => 24,
+            AppMemoryId::BlocksPtr => 25,
+            AppMemoryId::ReceiptsPtr => 26,
+            AppMemoryId::TxIndexPtr => 27,
+            AppMemoryId::BlobArena => 28,
+            AppMemoryId::BlobArenaMeta => 29,
+            AppMemoryId::BlobAllocTable => 30,
+            AppMemoryId::BlobFreeList => 31,
         }
     }
 

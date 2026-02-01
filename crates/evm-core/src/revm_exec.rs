@@ -7,6 +7,7 @@ use evm_db::chain_data::constants::{CHAIN_ID, DEFAULT_BLOCK_GAS_LIMIT};
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry};
 use evm_db::stable_state::{with_state, with_state_mut};
+use ic_stable_structures::Storable;
 use revm::context::{BlockEnv, Context};
 use revm::handler::{ExecuteCommitEvm, ExecuteEvm, MainBuilder};
 use revm::handler::MainnetContext;
@@ -97,14 +98,22 @@ pub fn execute_tx(
     };
 
     with_state_mut(|state| {
-        state.tx_index.insert(
-            tx_id,
-            TxIndexEntry {
-                block_number,
-                tx_index,
-            },
-        );
-        state.receipts.insert(tx_id, receipt.clone());
+        let entry = TxIndexEntry {
+            block_number,
+            tx_index,
+        };
+        let entry_bytes = entry.to_bytes().into_owned();
+        let entry_ptr = state
+            .blob_store
+            .store_bytes(&entry_bytes)
+            .unwrap_or_else(|_| panic!("blob_store: store_tx_index failed"));
+        let receipt_bytes = receipt.to_bytes().into_owned();
+        let receipt_ptr = state
+            .blob_store
+            .store_bytes(&receipt_bytes)
+            .unwrap_or_else(|_| panic!("blob_store: store_receipt failed"));
+        state.tx_index.insert(tx_id, entry_ptr);
+        state.receipts.insert(tx_id, receipt_ptr);
     });
 
     Ok(ExecOutcome {

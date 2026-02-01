@@ -215,6 +215,35 @@ pub struct EthReceiptView {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ExportCursorView {
+    pub block_number: u64,
+    pub segment: u8,
+    pub byte_offset: u32,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ExportChunkView {
+    pub segment: u8,
+    pub start: u32,
+    pub bytes: Vec<u8>,
+    pub payload_len: u32,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ExportResponseView {
+    pub chunks: Vec<ExportChunkView>,
+    pub next_cursor: Option<ExportCursorView>,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub enum ExportErrorView {
+    InvalidCursor { message: String },
+    Pruned { pruned_before_block: u64 },
+    MissingData { message: String },
+    Limit,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub enum PendingStatusView {
     Queued { seq: u64 },
     Included { block_number: u64, tx_index: u32 },
@@ -510,6 +539,54 @@ fn get_receipt(tx_id: Vec<u8>) -> Result<ReceiptView, LookupError> {
         }
     }
     Err(LookupError::NotFound)
+}
+
+#[ic_cdk::query]
+fn export_blocks(
+    cursor: Option<ExportCursorView>,
+    max_bytes: u32,
+) -> Result<ExportResponseView, ExportErrorView> {
+    let core_cursor = cursor.map(|value| evm_core::export::ExportCursor {
+        block_number: value.block_number,
+        segment: value.segment,
+        byte_offset: value.byte_offset,
+    });
+    let result = evm_core::export::export_blocks(core_cursor, max_bytes)
+        .map_err(export_error_to_view)?;
+    Ok(ExportResponseView {
+        chunks: result
+            .chunks
+            .into_iter()
+            .map(|chunk| ExportChunkView {
+                segment: chunk.segment,
+                start: chunk.start,
+                bytes: chunk.bytes,
+                payload_len: chunk.payload_len,
+            })
+            .collect(),
+        next_cursor: result.next_cursor.map(|value| ExportCursorView {
+            block_number: value.block_number,
+            segment: value.segment,
+            byte_offset: value.byte_offset,
+        }),
+    })
+}
+
+fn export_error_to_view(err: evm_core::export::ExportError) -> ExportErrorView {
+    match err {
+        evm_core::export::ExportError::InvalidCursor(message) => ExportErrorView::InvalidCursor {
+            message: message.to_string(),
+        },
+        evm_core::export::ExportError::Pruned {
+            pruned_before_block,
+        } => ExportErrorView::Pruned {
+            pruned_before_block,
+        },
+        evm_core::export::ExportError::MissingData(message) => ExportErrorView::MissingData {
+            message: message.to_string(),
+        },
+        evm_core::export::ExportError::Limit => ExportErrorView::Limit,
+    }
 }
 
 #[ic_cdk::query]

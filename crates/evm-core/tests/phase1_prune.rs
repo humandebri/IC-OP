@@ -3,6 +3,7 @@
 use evm_core::chain;
 use evm_db::chain_data::{BlockData, ReceiptLike, TxId, TxIndexEntry, TxLoc};
 use evm_db::stable_state::{init_stable_state, with_state, with_state_mut};
+use ic_stable_structures::Storable;
 
 #[test]
 fn prune_blocks_removes_old_data() {
@@ -17,15 +18,15 @@ fn prune_blocks_removes_old_data() {
     let block3 = make_block(3, tx3);
 
     with_state_mut(|state| {
-        state.blocks.insert(1, block1);
-        state.blocks.insert(2, block2);
-        state.blocks.insert(3, block3);
-        state.tx_index.insert(tx1, TxIndexEntry { block_number: 1, tx_index: 0 });
-        state.tx_index.insert(tx2, TxIndexEntry { block_number: 2, tx_index: 0 });
-        state.tx_index.insert(tx3, TxIndexEntry { block_number: 3, tx_index: 0 });
-        state.receipts.insert(tx1, fake_receipt(tx1, 1));
-        state.receipts.insert(tx2, fake_receipt(tx2, 2));
-        state.receipts.insert(tx3, fake_receipt(tx3, 3));
+        insert_block(state, 1, &block1);
+        insert_block(state, 2, &block2);
+        insert_block(state, 3, &block3);
+        insert_tx_index(state, tx1, 1);
+        insert_tx_index(state, tx2, 2);
+        insert_tx_index(state, tx3, 3);
+        insert_receipt(state, tx1, 1);
+        insert_receipt(state, tx2, 2);
+        insert_receipt(state, tx3, 3);
         state.tx_locs.insert(tx1, TxLoc::included(1, 0));
         state.tx_locs.insert(tx2, TxLoc::included(2, 0));
         state.tx_locs.insert(tx3, TxLoc::included(3, 0));
@@ -64,15 +65,15 @@ fn prune_blocks_respects_max_ops() {
     let block3 = make_block(3, tx3);
 
     with_state_mut(|state| {
-        state.blocks.insert(1, block1);
-        state.blocks.insert(2, block2);
-        state.blocks.insert(3, block3);
-        state.tx_index.insert(tx1, TxIndexEntry { block_number: 1, tx_index: 0 });
-        state.tx_index.insert(tx2, TxIndexEntry { block_number: 2, tx_index: 0 });
-        state.tx_index.insert(tx3, TxIndexEntry { block_number: 3, tx_index: 0 });
-        state.receipts.insert(tx1, fake_receipt(tx1, 1));
-        state.receipts.insert(tx2, fake_receipt(tx2, 2));
-        state.receipts.insert(tx3, fake_receipt(tx3, 3));
+        insert_block(state, 1, &block1);
+        insert_block(state, 2, &block2);
+        insert_block(state, 3, &block3);
+        insert_tx_index(state, tx1, 1);
+        insert_tx_index(state, tx2, 2);
+        insert_tx_index(state, tx3, 3);
+        insert_receipt(state, tx1, 1);
+        insert_receipt(state, tx2, 2);
+        insert_receipt(state, tx3, 3);
         state.tx_locs.insert(tx1, TxLoc::included(1, 0));
         state.tx_locs.insert(tx2, TxLoc::included(2, 0));
         state.tx_locs.insert(tx3, TxLoc::included(3, 0));
@@ -95,8 +96,9 @@ fn prune_blocks_respects_max_ops() {
 
 fn make_block(number: u64, tx_id: TxId) -> BlockData {
     let parent_hash = [0u8; 32];
-    let block_hash = [number as u8; 32];
-    let tx_list_hash = [number as u8; 32];
+    let number_u8 = u8::try_from(number).unwrap_or(0);
+    let block_hash = [number_u8; 32];
+    let tx_list_hash = [number_u8; 32];
     let state_root = [0u8; 32];
     BlockData::new(number, parent_hash, block_hash, number, vec![tx_id], tx_list_hash, state_root)
 }
@@ -114,4 +116,36 @@ fn fake_receipt(tx_id: TxId, block_number: u64) -> ReceiptLike {
         contract_address: None,
         logs: Vec::new(),
     }
+}
+
+fn insert_block(state: &mut evm_db::stable_state::StableState, number: u64, block: &BlockData) {
+    let bytes = block.to_bytes().into_owned();
+    let ptr = state
+        .blob_store
+        .store_bytes(&bytes)
+        .expect("store block");
+    state.blocks.insert(number, ptr);
+}
+
+fn insert_receipt(state: &mut evm_db::stable_state::StableState, tx_id: TxId, block_number: u64) {
+    let receipt = fake_receipt(tx_id, block_number);
+    let bytes = receipt.to_bytes().into_owned();
+    let ptr = state
+        .blob_store
+        .store_bytes(&bytes)
+        .expect("store receipt");
+    state.receipts.insert(tx_id, ptr);
+}
+
+fn insert_tx_index(state: &mut evm_db::stable_state::StableState, tx_id: TxId, block_number: u64) {
+    let entry = TxIndexEntry {
+        block_number,
+        tx_index: 0,
+    };
+    let bytes = entry.to_bytes().into_owned();
+    let ptr = state
+        .blob_store
+        .store_bytes(&bytes)
+        .expect("store tx_index");
+    state.tx_index.insert(tx_id, ptr);
 }

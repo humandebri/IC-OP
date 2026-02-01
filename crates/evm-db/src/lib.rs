@@ -3,6 +3,9 @@
 pub mod memory;
 pub mod meta;
 pub mod overlay;
+pub mod blob_ptr;
+pub mod blob_store;
+pub mod size_class;
 pub mod chain_data;
 pub mod stable_state;
 pub mod types;

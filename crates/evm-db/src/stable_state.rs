@@ -1,9 +1,11 @@
 //! どこで: StableBTreeMapの結線 / 何を: accounts/storage/codesの初期化 / なぜ: MemoryId凍結を反映するため
 
+use crate::blob_ptr::BlobPtr;
+use crate::blob_store::BlobStore;
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::chain_data::{
-    BlockData, CallerKey, ChainStateV1, Head, MetricsStateV1, PruneStateV1, QueueMeta, ReceiptLike,
-    SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxIndexEntry, ReadyKey,
+    CallerKey, ChainStateV1, Head, MetricsStateV1, PruneStateV1, QueueMeta,
+    SenderKey, SenderNonceKey, StoredTxBytes, TxId, ReadyKey,
 };
 use crate::chain_data::constants::CHAIN_ID;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
@@ -17,9 +19,9 @@ pub type Codes = StableBTreeMap<CodeKey, CodeVal, VMem>;
 pub type Queue = StableBTreeMap<u64, TxId, VMem>;
 pub type SeenTx = StableBTreeMap<TxId, u8, VMem>;
 pub type TxStore = StableBTreeMap<TxId, StoredTxBytes, VMem>;
-pub type TxIndex = StableBTreeMap<TxId, TxIndexEntry, VMem>;
-pub type Receipts = StableBTreeMap<TxId, ReceiptLike, VMem>;
-pub type Blocks = StableBTreeMap<u64, BlockData, VMem>;
+pub type TxIndex = StableBTreeMap<TxId, BlobPtr, VMem>;
+pub type Receipts = StableBTreeMap<TxId, BlobPtr, VMem>;
+pub type Blocks = StableBTreeMap<u64, BlobPtr, VMem>;
 pub type CallerNonces = StableBTreeMap<CallerKey, u64, VMem>;
 pub type TxLocs = StableBTreeMap<TxId, crate::chain_data::TxLoc, VMem>;
 pub type ReadyQueue = StableBTreeMap<ReadyKey, TxId, VMem>;
@@ -40,6 +42,7 @@ pub struct StableState {
     pub tx_index: TxIndex,
     pub receipts: Receipts,
     pub blocks: Blocks,
+    pub blob_store: BlobStore,
     pub queue_meta: StableCell<QueueMeta, VMem>,
     pub head: StableCell<Head, VMem>,
     pub chain_state: StableCell<ChainStateV1, VMem>,
@@ -67,9 +70,15 @@ pub fn init_stable_state() {
     let queue = StableBTreeMap::init(get_memory(AppMemoryId::Queue));
     let seen_tx = StableBTreeMap::init(get_memory(AppMemoryId::SeenTx));
     let tx_store = StableBTreeMap::init(get_memory(AppMemoryId::TxStore));
-    let tx_index = StableBTreeMap::init(get_memory(AppMemoryId::TxIndex));
-    let receipts = StableBTreeMap::init(get_memory(AppMemoryId::Receipts));
-    let blocks = StableBTreeMap::init(get_memory(AppMemoryId::Blocks));
+    let tx_index = StableBTreeMap::init(get_memory(AppMemoryId::TxIndexPtr));
+    let receipts = StableBTreeMap::init(get_memory(AppMemoryId::ReceiptsPtr));
+    let blocks = StableBTreeMap::init(get_memory(AppMemoryId::BlocksPtr));
+    let blob_store = BlobStore::new(
+        get_memory(AppMemoryId::BlobArena),
+        StableCell::init(get_memory(AppMemoryId::BlobArenaMeta), 0u64),
+        StableBTreeMap::init(get_memory(AppMemoryId::BlobAllocTable)),
+        StableBTreeMap::init(get_memory(AppMemoryId::BlobFreeList)),
+    );
     let queue_meta = StableCell::init(get_memory(AppMemoryId::QueueMeta), QueueMeta::new());
     let head = StableCell::init(
         get_memory(AppMemoryId::Head),
@@ -107,6 +116,7 @@ pub fn init_stable_state() {
             tx_index,
             receipts,
             blocks,
+            blob_store,
             queue_meta,
             head,
             chain_state,

@@ -4,9 +4,11 @@ use crate::selfdestruct::selfdestruct_address;
 use evm_db::stable_state::with_state_mut;
 use evm_db::types::keys::{make_account_key, make_code_key, make_storage_key};
 use evm_db::types::values::{AccountVal, CodeVal, U256Val};
+use ic_stable_structures::Storable;
 use revm::database_interface::{Database, DatabaseCommit};
 use revm::primitives::{Address, B256, StorageKey, StorageValue, U256, KECCAK_EMPTY};
 use revm::state::{Account, AccountInfo, Bytecode};
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RevmStableDb;
@@ -48,7 +50,12 @@ impl Database for RevmStableDb {
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         let hash = evm_db::stable_state::with_state(|state| {
-            state.blocks.get(&number).map(|b| b.block_hash)
+            if let Some(ptr) = state.blocks.get(&number) {
+                let bytes = state.blob_store.read(&ptr).ok()?;
+                let block = evm_db::chain_data::BlockData::from_bytes(Cow::Owned(bytes));
+                return Some(block.block_hash);
+            }
+            None
         });
         Ok(B256::from(hash.unwrap_or([0u8; 32])))
     }

@@ -1050,7 +1050,8 @@ fn get_queue_snapshot(limit: u32, cursor: Option<u64>) -> QueueSnapshotView {
 }
 ic_cdk::export_candid!();
 
-// NOTE: used by build-time tooling to snapshot candid for wire-compat checks.
+// NOTE: build-time only; keep out of production surface area.
+#[cfg(feature = "did-gen")]
 pub fn export_did() -> String {
     __export_service()
 }

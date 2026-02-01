@@ -165,15 +165,15 @@ retain の決定:
 
 ---
 
-## 8.5 export 連携（prune の上限ガード）
+## 8.5 export 連携（方針A: 外部DBはキャッシュ）
 
-外部 indexer が **pull** で export する前提を置く場合:
+* **外部DBはチェーンの正しさ/進行に影響しない**
+* pruning は **target_bytes / retain_days** のみで決める
+* 外部DBは **再構築可能な派生データ**として扱う
 
-* `exported_before_block: Option<u64>` を保持
-* indexer が `ack_exported(block)` で進捗を返す
-* prune は **min(prune_cursor, exported_before_block)** までしか進めない
-
-これにより「未exportのブロックが消える」事故を防げる。
+この方針では export の ACK には依存しない。  
+結果として「indexer停止中に prune が進み、外部履歴が欠ける」可能性はある。  
+これは **観測性の損失**として許容する。
 
 ---
 

@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 dev-faucet = []
+did-gen = []
 
 [dependencies]
 candid = "0.10"
@@ -23,3 +24,8 @@ path = "../evm-core"
 [dependencies.evm_db]
 package = "evm-db"
 path = "../evm-db"
+
+[[bin]]
+name = "export_did"
+path = "src/bin/export_did.rs"
+required-features = ["did-gen"]

@@ -21,7 +21,7 @@ pub use constants::{
 };
 pub use metrics::{MetricsStateV1, MetricsWindowSummary, METRICS_BUCKETS};
 pub use ordering::{ReadyKey, SenderKey, SenderNonceKey};
-pub use prune_state::PruneStateV1;
+pub use prune_state::{PruneJournal, PruneStateV1};
 pub use queue::QueueMeta;
 pub use receipt::ReceiptLike;
 pub use tx_loc::{TxLoc, TxLocKind};

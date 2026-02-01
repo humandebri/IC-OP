@@ -10,6 +10,11 @@
 Edge Functions だけでも可能だが、EVM logs が増えると **CPU/メモリが先に詰まる**。  
 **常駐ワーカー（Rust/TS）**が最も安定。
 
+**方針A（外部DBはキャッシュ）**:
+* 外部DBは **派生データ**として扱い、チェーンの正しさ/進行に影響させない  
+* prune は **target_bytes / retain_days のみ**で決定する  
+* indexer停止中に prune が進む可能性はある（観測性の損失として許容）
+
 ---
 
 ## 1) 取り込みフロー（pull）
@@ -437,9 +442,6 @@ cursor: opt Cursor
 * ここが安定しない限り prune は禁止
 
 **Step 3: prune ガードを入れる（超重要）**  
-最低限どちらかは必須:
-* **ack 方式（推奨）**: `exported_before_block` を indexer が更新  
-  * prune は `<= exported_before_block` までしか進めない  
 * **手動フラグ方式（簡易）**: `pruning_enabled=false` を運用で明示的に ON
 
 **Step 4: prune 実装（手動/テスト）**  

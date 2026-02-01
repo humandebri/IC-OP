@@ -196,13 +196,15 @@ cursor は **ブロック内の分割**を表現できる形にする。
 * 返信も **2MiB前提で分割**が無難  
 * `max_bytes = 1_000_000〜1_500_000` を推奨
 
-### pruning と export の連携（事故防止）
+### pruning と export の関係（方針A: 外部DBはキャッシュ）
 
-* `exported_before_block` を canister 側に保持
-* indexer が `ack_exported(block)` で進捗を返す
-* prune は **min(prune_cursor, exported_before_block)** までしか進めない
+* **チェーンの正しさ/進行は外部DBに依存しない**
+* pruning は **target_bytes / retain_days のみ**で決める
+* indexer/外部DBは **再構築可能な派生データ**
 
-これで「未exportのブロックが消える」事故を防げる。
+この方針では **exportのACKに依存しない**。  
+落とし穴は「indexerが落ちている間に prune が進むと、外部履歴が欠ける」点。  
+これは **観測性の損失**として許容する。
 
 注意:
 * Candid のオーバーヘッドがあるため、上限ギリギリは避ける  

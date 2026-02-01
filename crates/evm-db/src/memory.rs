@@ -41,6 +41,7 @@ pub enum AppMemoryId {
     BlobArenaMeta = 29,
     BlobAllocTable = 30,
     BlobFreeList = 31,
+    PruneJournal = 32,
 }
 
 impl AppMemoryId {
@@ -78,6 +79,7 @@ impl AppMemoryId {
             AppMemoryId::BlobArenaMeta => 29,
             AppMemoryId::BlobAllocTable => 30,
             AppMemoryId::BlobFreeList => 31,
+            AppMemoryId::PruneJournal => 32,
         }
     }
 

@@ -11,7 +11,7 @@ use evm_db::chain_data::constants::{
     DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE,
 };
 use evm_db::chain_data::{
-    BlockData, Head, RawTx, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey,
+    BlockData, Head, PruneJournal, RawTx, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey,
     StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use evm_db::stable_state::{with_state, with_state_mut, StableState};
@@ -578,6 +578,7 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
         return Err(ChainError::InvalidLimit);
     }
     with_state_mut(|state| {
+        recover_prune_journal(state)?;
         let head_number = state.head.get().number;
         if head_number <= retain {
             let pruned_before = state.prune_state.get().pruned_before();
@@ -612,6 +613,21 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
             if ops_used.saturating_add(needed) > max_ops {
                 break;
             }
+            let mut ptrs = collect_ptrs_for_block(state, next, &block);
+            for ptr in ptrs.iter() {
+                state
+                    .blob_store
+                    .mark_quarantine(ptr)
+                    .map_err(|_| ChainError::ExecFailed(None))?;
+            }
+            state.prune_journal.insert(
+                next,
+                PruneJournal {
+                    ptrs: ptrs.clone(),
+                },
+            );
+            prune_state.set_journal_block(next);
+
             let _ = state.blocks.remove(&next);
             for tx_id in block.tx_ids.iter() {
                 state.receipts.remove(tx_id);
@@ -623,6 +639,15 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
             prune_state.set_pruned_before(next);
             next = next.saturating_add(1);
             did_work = true;
+
+            for ptr in ptrs.drain(..) {
+                state
+                    .blob_store
+                    .mark_free(&ptr)
+                    .map_err(|_| ChainError::ExecFailed(None))?;
+            }
+            state.prune_journal.remove(&next.saturating_sub(1));
+            prune_state.clear_journal();
         }
         prune_state.next_prune_block = next;
         state.prune_state.set(prune_state);
@@ -637,6 +662,62 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
             pruned_before_block: prune_state.pruned_before(),
         })
     })
+}
+
+fn recover_prune_journal(state: &mut evm_db::stable_state::StableState) -> Result<(), ChainError> {
+    let mut prune_state = *state.prune_state.get();
+    let journal_block = match prune_state.journal_block() {
+        Some(value) => value,
+        None => return Ok(()),
+    };
+    if let Some(journal) = state.prune_journal.get(&journal_block) {
+        if let Some(block) = load_block(state, journal_block) {
+            let _ = state.blocks.remove(&journal_block);
+            for tx_id in block.tx_ids.iter() {
+                state.receipts.remove(tx_id);
+                state.tx_index.remove(tx_id);
+                state.tx_locs.remove(tx_id);
+                state.tx_store.remove(tx_id);
+            }
+            if let Some(pruned) = prune_state.pruned_before() {
+                if pruned < journal_block {
+                    prune_state.set_pruned_before(journal_block);
+                }
+            } else {
+                prune_state.set_pruned_before(journal_block);
+            }
+        }
+        for ptr in journal.ptrs.iter() {
+            state
+                .blob_store
+                .mark_free(ptr)
+                .map_err(|_| ChainError::ExecFailed(None))?;
+        }
+        state.prune_journal.remove(&journal_block);
+    }
+    prune_state.clear_journal();
+    state.prune_state.set(prune_state);
+    Ok(())
+}
+
+fn collect_ptrs_for_block(
+    state: &evm_db::stable_state::StableState,
+    block_number: u64,
+    block: &BlockData,
+) -> Vec<evm_db::blob_ptr::BlobPtr> {
+    let mut out = Vec::new();
+    if let Some(ptr) = state.blocks.get(&block_number) {
+        out.push(ptr);
+    }
+    for tx_id in block.tx_ids.iter() {
+        if let Some(ptr) = state.receipts.get(tx_id) {
+            out.push(ptr);
+        }
+        if let Some(ptr) = state.tx_index.get(tx_id) {
+            out.push(ptr);
+        }
+    }
+    out
 }
 
 pub struct QueueItem {

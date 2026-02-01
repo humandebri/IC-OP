@@ -1,24 +1,31 @@
 //! どこで: pruningの状態管理 / 何を: pruned_before_block等の保持 / なぜ: None判定を安定させるため
 
+use crate::blob_ptr::BlobPtr;
+use crate::chain_data::constants::MAX_TXS_PER_BLOCK_U32;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 
-const PRUNE_STATE_SIZE_U32: u32 = 24;
+const PRUNE_STATE_SIZE_U32: u32 = 32;
+const JOURNAL_NONE: u64 = u64::MAX;
+const MAX_PTRS_U32: u32 = 1 + (2 * MAX_TXS_PER_BLOCK_U32);
+const JOURNAL_MAX_SIZE_U32: u32 = 4 + (MAX_PTRS_U32 * 20);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneStateV1 {
     pub schema_version: u32,
     pub pruned_before_block: u64,
     pub next_prune_block: u64,
+    pub journal_block_number: u64,
 }
 
 impl PruneStateV1 {
     pub fn new() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             pruned_before_block: u64::MAX,
             next_prune_block: 0,
+            journal_block_number: JOURNAL_NONE,
         }
     }
 
@@ -33,6 +40,22 @@ impl PruneStateV1 {
     pub fn set_pruned_before(&mut self, value: u64) {
         self.pruned_before_block = value;
     }
+
+    pub fn journal_block(&self) -> Option<u64> {
+        if self.journal_block_number == JOURNAL_NONE {
+            None
+        } else {
+            Some(self.journal_block_number)
+        }
+    }
+
+    pub fn set_journal_block(&mut self, value: u64) {
+        self.journal_block_number = value;
+    }
+
+    pub fn clear_journal(&mut self) {
+        self.journal_block_number = JOURNAL_NONE;
+    }
 }
 
 impl Default for PruneStateV1 {
@@ -43,10 +66,11 @@ impl Default for PruneStateV1 {
 
 impl Storable for PruneStateV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 24];
+        let mut out = [0u8; 32];
         out[0..4].copy_from_slice(&self.schema_version.to_be_bytes());
         out[4..12].copy_from_slice(&self.pruned_before_block.to_be_bytes());
         out[12..20].copy_from_slice(&self.next_prune_block.to_be_bytes());
+        out[20..28].copy_from_slice(&self.journal_block_number.to_be_bytes());
         Cow::Owned(out.to_vec())
     }
 
@@ -56,7 +80,7 @@ impl Storable for PruneStateV1 {
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
-        if data.len() != 24 {
+        if data.len() != 32 {
             ic_cdk::trap("prune_state: invalid length");
         }
         let mut schema = [0u8; 4];
@@ -65,15 +89,77 @@ impl Storable for PruneStateV1 {
         pruned_before_block.copy_from_slice(&data[4..12]);
         let mut next_prune_block = [0u8; 8];
         next_prune_block.copy_from_slice(&data[12..20]);
+        let mut journal_block_number = [0u8; 8];
+        journal_block_number.copy_from_slice(&data[20..28]);
         Self {
             schema_version: u32::from_be_bytes(schema),
             pruned_before_block: u64::from_be_bytes(pruned_before_block),
             next_prune_block: u64::from_be_bytes(next_prune_block),
+            journal_block_number: u64::from_be_bytes(journal_block_number),
         }
     }
 
     const BOUND: Bound = Bound::Bounded {
         max_size: PRUNE_STATE_SIZE_U32,
         is_fixed_size: true,
+    };
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PruneJournal {
+    pub ptrs: Vec<BlobPtr>,
+}
+
+impl Storable for PruneJournal {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let len = u32::try_from(self.ptrs.len())
+            .unwrap_or_else(|_| ic_cdk::trap("prune_journal: len overflow"));
+        if len > MAX_PTRS_U32 {
+            ic_cdk::trap("prune_journal: too many ptrs");
+        }
+        let mut out = Vec::with_capacity(4 + (self.ptrs.len() * 20));
+        out.extend_from_slice(&len.to_be_bytes());
+        for ptr in self.ptrs.iter() {
+            let bytes = ptr.to_bytes();
+            out.extend_from_slice(&bytes);
+        }
+        Cow::Owned(out)
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_bytes().into_owned()
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let data = bytes.as_ref();
+        if data.len() < 4 {
+            ic_cdk::trap("prune_journal: invalid length");
+        }
+        let mut len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&data[0..4]);
+        let len = u32::from_be_bytes(len_bytes);
+        if len > MAX_PTRS_U32 {
+            ic_cdk::trap("prune_journal: too many ptrs");
+        }
+        let expected = 4usize
+            .checked_add((len as usize).saturating_mul(20))
+            .unwrap_or(0);
+        if data.len() != expected {
+            ic_cdk::trap("prune_journal: length mismatch");
+        }
+        let mut ptrs = Vec::with_capacity(len as usize);
+        let mut offset = 4usize;
+        for _ in 0..len {
+            let end = offset + 20;
+            let ptr = BlobPtr::from_bytes(Cow::Owned(data[offset..end].to_vec()));
+            ptrs.push(ptr);
+            offset = end;
+        }
+        Self { ptrs }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: JOURNAL_MAX_SIZE_U32,
+        is_fixed_size: false,
     };
 }

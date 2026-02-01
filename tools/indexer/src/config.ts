@@ -1,5 +1,7 @@
 // どこで: indexer設定 / 何を: 環境変数の読み込み / なぜ: 実行環境差分を吸収するため
 
+import path from "path";
+
 export type Config = {
   canisterId: string;
   icHost: string;
@@ -8,13 +10,19 @@ export type Config = {
   backoffInitialMs: number;
   backoffMaxMs: number;
   fetchRootKey: boolean;
+  archiveDir: string;
+  chainId: string;
+  zstdLevel: number;
 };
 
-const DEFAULT_IC_HOST = "http://127.0.0.1:4943";
+const DEFAULT_IC_HOST = "https://icp-api.io";
 const DEFAULT_DB_PATH = "./indexer.sqlite";
 const DEFAULT_MAX_BYTES = 1_200_000;
 const DEFAULT_BACKOFF_INITIAL_MS = 200;
 const DEFAULT_BACKOFF_MAX_MS = 5_000;
+const DEFAULT_ARCHIVE_DIR = "./archive";
+const DEFAULT_CHAIN_ID = "unknown";
+const DEFAULT_ZSTD_LEVEL = 3;
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const canisterId = env.INDEXER_CANISTER_ID;
@@ -35,6 +43,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     "INDEXER_BACKOFF_MAX_MS"
   );
   const fetchRootKey = env.INDEXER_FETCH_ROOT_KEY === "1" || env.INDEXER_FETCH_ROOT_KEY === "true";
+  const archiveDirRaw = env.INDEXER_ARCHIVE_DIR ?? DEFAULT_ARCHIVE_DIR;
+  const archiveDir = path.resolve(archiveDirRaw);
+  const chainId = env.INDEXER_CHAIN_ID ?? DEFAULT_CHAIN_ID;
+  const zstdLevel = readNumber(env.INDEXER_ZSTD_LEVEL, DEFAULT_ZSTD_LEVEL, "INDEXER_ZSTD_LEVEL");
   return {
     canisterId,
     icHost,
@@ -43,6 +55,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     backoffInitialMs,
     backoffMaxMs,
     fetchRootKey,
+    archiveDir,
+    chainId,
+    zstdLevel,
   };
 }
 

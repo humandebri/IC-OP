@@ -12,13 +12,21 @@ npm run dev
 
 ## 環境変数
 
+- `.env.local` はローカル用のテンプレート
+- `.env.example` は配布用のひな型
+
 - `INDEXER_CANISTER_ID` (必須)
-- `INDEXER_IC_HOST` (任意, 既定: http://127.0.0.1:4943)
+- `INDEXER_IC_HOST` (任意, 既定: https://icp-api.io)
 - `INDEXER_DB_PATH` (任意, 既定: ./indexer.sqlite)
 - `INDEXER_MAX_BYTES` (任意, 既定: 1200000)
 - `INDEXER_BACKOFF_INITIAL_MS` (任意, 既定: 200)
 - `INDEXER_BACKOFF_MAX_MS` (任意, 既定: 5000)
 - `INDEXER_FETCH_ROOT_KEY` (任意, 1/true で有効。local向け)
+- `INDEXER_ARCHIVE_DIR` (任意, 既定: ./archive)
+- `INDEXER_CHAIN_ID` (任意, 既定: unknown)
+- `INDEXER_ZSTD_LEVEL` (任意, 既定: 3)
+
+注: ローカル（dfx）向けに接続する場合は `INDEXER_IC_HOST` を `http://127.0.0.1:4943` にし、`INDEXER_FETCH_ROOT_KEY=true` を推奨。
 
 ## Cursor JSON（固定）
 
@@ -34,3 +42,11 @@ npm run dev
 * block_number は **10進ASCII、先頭0なし**（"0"は許可）
 * segment は **0/1/2**
 * byte_offset は **0..=u32**
+
+## archive_parts
+
+`archive_parts` は **再構築可能なキャッシュ**。消しても canister から再作成できる。
+
+## metrics_daily
+
+`sqlite_growth_bytes` は v0 では未更新（将来、DBサイズ差分で計測する）。

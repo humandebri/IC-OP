@@ -24,6 +24,7 @@ export class IndexerDb {
   private upsertBlockStmt: Database.Statement;
   private upsertTxStmt: Database.Statement;
   private upsertMetricsStmt: Database.Statement;
+  private upsertArchiveStmt: Database.Statement;
 
   constructor(path: string) {
     this.db = new Database(path);
@@ -31,7 +32,9 @@ export class IndexerDb {
     this.db.pragma("synchronous = NORMAL");
     this.db.exec(schemaSql());
     this.getMetaStmt = this.db.prepare("SELECT value FROM meta WHERE key = ?");
-    this.upsertMetaStmt = this.db.prepare("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    this.upsertMetaStmt = this.db.prepare(
+      "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    );
     this.upsertBlockStmt = this.db.prepare(
       "INSERT INTO blocks(number, hash, timestamp, tx_count) VALUES(?, ?, ?, ?) ON CONFLICT(number) DO UPDATE SET hash = excluded.hash, timestamp = excluded.timestamp, tx_count = excluded.tx_count"
     );
@@ -39,7 +42,23 @@ export class IndexerDb {
       "INSERT INTO txs(tx_hash, block_number, tx_index) VALUES(?, ?, ?) ON CONFLICT(tx_hash) DO UPDATE SET block_number = excluded.block_number, tx_index = excluded.tx_index"
     );
     this.upsertMetricsStmt = this.db.prepare(
-      \"INSERT INTO metrics_daily(day, raw_bytes, compressed_bytes, sqlite_growth_bytes, blocks_ingested, errors) VALUES(?, ?, ?, ?, ?, ?) \" +\n+        \"ON CONFLICT(day) DO UPDATE SET \" +\n+        \"raw_bytes = raw_bytes + excluded.raw_bytes, \" +\n+        \"compressed_bytes = excluded.compressed_bytes, \" +\n+        \"sqlite_growth_bytes = excluded.sqlite_growth_bytes, \" +\n+        \"blocks_ingested = blocks_ingested + excluded.blocks_ingested, \" +\n+        \"errors = errors + excluded.errors\"\n+    );\n   }\n@@\n   upsertTx(row: TxRow): void {\n     this.upsertTxStmt.run(row.tx_hash, row.block_number, row.tx_index);\n   }\n+\n+  addMetrics(day: number, rawBytes: number, blocksIngested: number, errors: number): void {\n+    this.upsertMetricsStmt.run(day, rawBytes, null, null, blocksIngested, errors);\n+  }\n*** End Patch"}}
+      "INSERT INTO metrics_daily(day, raw_bytes, compressed_bytes, sqlite_growth_bytes, blocks_ingested, errors) VALUES(?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(day) DO UPDATE SET " +
+        "raw_bytes = raw_bytes + excluded.raw_bytes, " +
+        "compressed_bytes = compressed_bytes + excluded.compressed_bytes, " +
+        "sqlite_growth_bytes = excluded.sqlite_growth_bytes, " +
+        "blocks_ingested = blocks_ingested + excluded.blocks_ingested, " +
+        "errors = errors + excluded.errors"
+    );
+    this.upsertArchiveStmt = this.db.prepare(
+      "INSERT INTO archive_parts(block_number, path, sha256, size_bytes, raw_bytes, created_at) VALUES(?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(block_number) DO UPDATE SET " +
+        "path = excluded.path, " +
+        "sha256 = excluded.sha256, " +
+        "size_bytes = excluded.size_bytes, " +
+        "raw_bytes = excluded.raw_bytes, " +
+        "created_at = excluded.created_at"
+    );
   }
 
   close(): void {
@@ -70,6 +89,29 @@ export class IndexerDb {
 
   upsertTx(row: TxRow): void {
     this.upsertTxStmt.run(row.tx_hash, row.block_number, row.tx_index);
+  }
+
+  addMetrics(day: number, rawBytes: number, compressedBytes: number, blocksIngested: number, errors: number): void {
+    // sqlite_growth_bytes は v0 では未更新（将来、DBサイズ差分で計測）
+    this.upsertMetricsStmt.run(day, rawBytes, compressedBytes, null, blocksIngested, errors);
+  }
+
+  addArchive(params: {
+    blockNumber: bigint;
+    path: string;
+    sha256: Buffer;
+    sizeBytes: number;
+    rawBytes: number;
+    createdAt: number;
+  }): void {
+    this.upsertArchiveStmt.run(
+      params.blockNumber,
+      params.path,
+      params.sha256,
+      params.sizeBytes,
+      params.rawBytes,
+      params.createdAt
+    );
   }
 
   transaction<T>(fn: () => T): T {
@@ -122,6 +164,15 @@ function schemaSql(): string {
       sqlite_growth_bytes integer,
       blocks_ingested integer,
       errors integer
+    );
+
+    create table if not exists archive_parts (
+      block_number integer primary key,
+      path text not null,
+      sha256 blob not null,
+      size_bytes integer not null,
+      raw_bytes integer not null,
+      created_at integer not null
     );
   `;
 }

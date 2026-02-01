@@ -13,6 +13,7 @@
   "dependencies": {
     "@dfinity/agent": "^3.4.3",
     "@dfinity/candid": "^3.4.3",
+    "@mongodb-js/zstd": "^7.0.0",
     "better-sqlite3": "^12.6.2"
   },
   "devDependencies": {

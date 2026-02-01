@@ -8,7 +8,7 @@ use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::{BlockData, RawTx, ReceiptLike, StoredTx, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind};
 use evm_db::stable_state::{init_stable_state, with_state};
 use evm_db::upgrade;
-use evm_core::chain;
+use evm_core::{chain, hash};
 use serde::Deserialize;
 
 #[cfg(target_arch = "wasm32")]
@@ -181,6 +181,7 @@ pub struct EthBlockView {
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct EthTxView {
     pub hash: Vec<u8>,
+    pub eth_tx_hash: Option<Vec<u8>>,
     pub kind: TxKindView,
     pub raw: Vec<u8>,
     pub decoded: Option<DecodedTxView>,
@@ -866,6 +867,11 @@ fn envelope_to_eth_view(
 
     Some(EthTxView {
         hash: stored.tx_id.0.to_vec(),
+        eth_tx_hash: if kind == TxKind::EthSigned {
+            Some(hash::keccak256(raw_bytes(&stored.raw)).to_vec())
+        } else {
+            None
+        },
         kind: tx_kind_to_view(kind),
         raw: raw_bytes(&stored.raw).clone(),
         decode_ok: decoded.is_some(),

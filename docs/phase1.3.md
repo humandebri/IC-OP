@@ -94,16 +94,11 @@ nonce == state.nonce(sender)（次で説明する「nonce詰まり回避」を�
 
 B) 手数料並べ替え（ordering）
 
-## 4) FIFO固定との矛盾を解消する（Phase1.3の位置付け）
+## 4) 並べ替えは FEE_SORTED 固定（FIFOに戻さない）
 
-Phase1.2 は FIFO 固定なので、Phase1.3 で **並べ替え導入**を明示する。
+Queue ordering は **FEE_SORTED 固定**。
 
-選択肢A（おすすめ）: `ordering_mode` を導入して段階的に切替
-
-* Phase1.2: `ordering_mode = FIFO`（既定）
-* Phase1.3: `ordering_mode = FEE_SORTED` を追加
-  * Phase1.3で切替えるなら default を **FEE_SORTED**
-  * 互換性優先なら default を **FIFO** のまま、運用フラグで切替
+tie-break（seq）と sender の nonce gate を **仕様として固定**する。
 
 単純に「キュー全体をソート」は、長期運用で重くなるのでやめた方がいい。代わりに **優先度キュー（実体は StableBTreeMap）**を作る。
 
@@ -317,7 +312,7 @@ caller_evm = last20bytes(keccak256("ic-evm:caller_evm:v1" || principal_bytes))
 * IcSynthetic は `caller_evm / canister_id / caller_principal` が必須
 * EthSigned は raw が EIP-2718、生caller/principalは空
 
-### 7) nonce 運用（IcSynthetic）
+### 7) nonce 運用（IcSynthetic/共通）
 
 **expected_nonce(sender)** を「次に受理されるnonce」と定義する。
 
@@ -333,14 +328,13 @@ caller_evm = last20bytes(keccak256("ic-evm:caller_evm:v1" || principal_bytes))
 * Decode失敗など実行前不正 → **nonce非消費**
 * nonce運用/置換ルールは **EthSigned も同一**
 
-### 7) IcSynthetic の nonce 運用（固定）
+### 8) expected_nonce_by_address（運用query）
 
-* nonce は **callerごとに厳密一致**（expected_nonce と一致しない場合は **submit時に reject**）
-* **gap は許容しない**（pendingで保持しない）
-* 同一nonceの置換は **fee↑のみ許可**（それ以外は NonceConflict）
-* 目的：nonce gap による詰まり/リプレイを予防する
+* `expected_nonce_by_address(address)` は **次に受理されるnonce** を返す
+* 初期化済みなら **sender_expected_nonce（stable）**、未初期化なら **EVM state nonce**
+* 返り値の用途は **送信前のnonce確認/スモーク** に限定する
 
-### 8) EthSigned の tx hash（運用/UX）
+### 9) EthSigned の tx hash（運用/UX）
 
 * `tx_id` は内部IDとして保持
 * EVM互換の利用に備えて **`eth_tx_hash = keccak(raw)` を別途保持/返却**するのが望ましい
@@ -361,7 +355,7 @@ queue_snapshot の cursor は **seq ではなく offset**（ready_queue の先�
 
 legacy の gas_price < min は submit で reject
 
-## 7) 追加テスト（運用に効く）
+## 10) 追加テスト（運用に効く）
 
 * legacy/1559 の `effective_gas_price` が receipt まで一致する
 * 1559 の min fee 未満が submit で reject（drop ではない）

@@ -328,7 +328,7 @@ max_tx_size / max_gas_per_tx / max_code_size が効く
 手動スモーク（dfx）:
 - dfx start --clean --background
 - dfx deploy
-- dfx canister call <canister> dev_mint '(vec {0x11: nat8; ...}, 1000000000000:nat)' ※任意
+- dfx canister call <canister> dev_mint '(vec {0x11: nat8; ...}, 1000000000000:nat)' ※任意（controllerのみ）
 - dfx canister call <canister> submit_tx '(blob "<raw_eip2718_tx>")'
 - dfx canister call <canister> produce_block '(1:nat)'
 - dfx canister call <canister> get_block '(0:nat)' / get_receipt

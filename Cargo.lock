@@ -1201,6 +1201,7 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-stable-structures",
+ "tiny-keccak",
 ]
 
 [[package]]

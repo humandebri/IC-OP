@@ -4,7 +4,7 @@ use evm_core::chain::{self, ChainError};
 use evm_db::chain_data::constants::{
     DROP_CODE_DECODE, DROP_CODE_INVALID_FEE,
 };
-use evm_db::chain_data::{ReadyKey, SenderKey, SenderNonceKey, StoredTx, TxId, TxKind, TxLoc, TxLocKind};
+use evm_db::chain_data::{ReadyKey, SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind};
 use evm_db::stable_state::{init_stable_state, with_state_mut};
 
 #[test]
@@ -12,11 +12,13 @@ fn produce_block_marks_decode_drop() {
     init_stable_state();
 
     let tx_id = TxId([0x10u8; 32]);
-    let envelope = StoredTx::new_with_fees(
+    let envelope = StoredTxBytes::new_with_fees(
         tx_id,
         TxKind::EthSigned,
         vec![0x01],
         None,
+        Vec::new(),
+        Vec::new(),
         0,
         0,
         false,
@@ -73,11 +75,13 @@ fn produce_block_marks_caller_missing() {
 
     let tx_bytes = build_ic_tx_bytes_with_fee(2_000_000_000, 1_000_000_000);
     let tx_id = TxId([0x33u8; 32]);
-    let envelope = StoredTx::new_with_fees(
+    let envelope = StoredTxBytes::new_with_fees(
         tx_id,
         TxKind::IcSynthetic,
         tx_bytes,
         None,
+        Vec::new(),
+        Vec::new(),
         2_000_000_000,
         1_000_000_000,
         true,
@@ -108,8 +112,7 @@ fn produce_block_marks_exec_drop() {
     init_stable_state();
 
     let tx_bytes = build_ic_tx_bytes_with_fee(2_000_000_000, 1_000_000_000);
-    let caller = [0x11u8; 20];
-    let tx_id = chain::submit_ic_tx(caller, vec![0x11], vec![0x22], tx_bytes).expect("submit");
+    let tx_id = chain::submit_ic_tx(vec![0x11], vec![0x22], tx_bytes).expect("submit");
     let block = chain::produce_block(1).expect("produce_block should succeed");
     assert_eq!(block.tx_ids.len(), 1);
 

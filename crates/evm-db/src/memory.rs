@@ -32,6 +32,8 @@ pub enum AppMemoryId {
     PendingBySenderNonce = 20,
     PendingMinNonce = 21,
     PendingMetaByTxId = 22,
+    SenderExpectedNonce = 23,
+    PendingCurrentBySender = 24,
 }
 
 impl AppMemoryId {
@@ -60,6 +62,8 @@ impl AppMemoryId {
             AppMemoryId::PendingBySenderNonce => 20,
             AppMemoryId::PendingMinNonce => 21,
             AppMemoryId::PendingMetaByTxId => 22,
+            AppMemoryId::SenderExpectedNonce => 23,
+            AppMemoryId::PendingCurrentBySender => 24,
         }
     }
 

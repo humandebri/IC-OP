@@ -6,12 +6,12 @@ use crate::revm_exec::{compute_effective_gas_price, execute_tx, ExecError};
 use crate::state_root::compute_state_root;
 use crate::tx_decode::decode_tx;
 use evm_db::chain_data::constants::{
-    CHAIN_ID, DEFAULT_BLOCK_GAS_LIMIT, DROP_CODE_CALLER_MISSING, DROP_CODE_DECODE, DROP_CODE_MISSING,
-    DROP_CODE_INVALID_FEE, MAX_TX_SIZE,
+    DEFAULT_BLOCK_GAS_LIMIT, DROP_CODE_CALLER_MISSING, DROP_CODE_DECODE, DROP_CODE_MISSING,
+    DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE,
 };
 use evm_db::chain_data::{
-    BlockData, CallerKey, Head, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey, StoredTx, TxId,
-    TxIndexEntry, TxKind, TxLoc,
+    BlockData, Head, RawTx, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey,
+    StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use evm_db::stable_state::{with_state, with_state_mut};
 use evm_db::types::keys::make_account_key;
@@ -27,6 +27,8 @@ pub enum ChainError {
     InvalidLimit,
     DecodeFailed,
     InvalidFee,
+    NonceTooLow,
+    NonceGap,
     NonceConflict,
     ExecFailed(Option<ExecError>),
     NoExecutableTx,
@@ -50,7 +52,7 @@ pub struct PruneResult {
 }
 
 pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
-    let tx_id = TxId(hash::tx_id(&tx_bytes));
+    let tx_id = TxId(hash::stored_tx_id(kind, &tx_bytes, None, None, None));
     with_state_mut(|state| {
         if tx_bytes.len() > MAX_TX_SIZE {
             return Err(ChainError::TxTooLarge);
@@ -70,11 +72,13 @@ pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
             TxKind::IcSynthetic => Some(caller),
             TxKind::EthSigned => None,
         };
-        let envelope = StoredTx::new_with_fees(
+        let envelope = StoredTxBytes::new_with_fees(
             tx_id,
             kind,
             tx_bytes,
             caller_evm,
+            Vec::new(),
+            Vec::new(),
             max_fee_per_gas,
             max_priority_fee_per_gas,
             is_dynamic_fee,
@@ -117,7 +121,6 @@ pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
 }
 
 pub fn submit_ic_tx(
-    caller_evm: [u8; 20],
     caller_principal: Vec<u8>,
     canister_id: Vec<u8>,
     tx_bytes: Vec<u8>,
@@ -126,29 +129,36 @@ pub fn submit_ic_tx(
         if tx_bytes.len() > MAX_TX_SIZE {
             return Err(ChainError::TxTooLarge);
         }
-        let caller_key = CallerKey::from_principal_bytes(&caller_principal);
-        let current_nonce = state.caller_nonces.get(&caller_key).unwrap_or(0);
-        let next_nonce = current_nonce.saturating_add(1);
-        state.caller_nonces.insert(caller_key, next_nonce);
-        let tx_id = TxId(hash::ic_synthetic_tx_id(
-            CHAIN_ID,
-            &canister_id,
-            &caller_principal,
-            current_nonce,
+        let caller_evm = hash::caller_evm_from_principal(&caller_principal);
+        let sender_key = SenderKey::new(caller_evm);
+        let tx_env = decode_tx(TxKind::IcSynthetic, Address::from(caller_evm), &tx_bytes)
+            .map_err(|_| ChainError::DecodeFailed)?;
+        let expected_nonce = expected_nonce_for_sender(state, sender_key);
+        if tx_env.nonce < expected_nonce {
+            return Err(ChainError::NonceTooLow);
+        }
+        if tx_env.nonce > expected_nonce {
+            return Err(ChainError::NonceGap);
+        }
+        let tx_id = TxId(hash::stored_tx_id(
+            TxKind::IcSynthetic,
             &tx_bytes,
+            Some(caller_evm),
+            Some(&canister_id),
+            Some(&caller_principal),
         ));
         if state.seen_tx.get(&tx_id).is_some() {
             return Err(ChainError::TxAlreadySeen);
         }
-        let tx_env = decode_tx(TxKind::IcSynthetic, Address::from(caller_evm), &tx_bytes)
-        .map_err(|_| ChainError::DecodeFailed)?;
         let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee) =
             fee_fields_from_tx_env(&tx_env);
-        let envelope = StoredTx::new_with_fees(
+        let envelope = StoredTxBytes::new_with_fees(
             tx_id,
             TxKind::IcSynthetic,
             tx_bytes,
             Some(caller_evm),
+            canister_id,
+            caller_principal,
             max_fee_per_gas,
             max_priority_fee_per_gas,
             is_dynamic_fee,
@@ -161,13 +171,24 @@ pub fn submit_ic_tx(
             return Err(ChainError::InvalidFee);
         }
         let effective_gas_price = compute_effective_gas_price(
-            tx_env.gas_price,
-            tx_env.gas_priority_fee.unwrap_or(0),
+            max_fee_per_gas,
+            if is_dynamic_fee { max_priority_fee_per_gas } else { 0 },
             base_fee,
         )
         .ok_or(ChainError::InvalidFee)?;
+        if let Some(old_tx_id) = state.pending_current_by_sender.get(&sender_key) {
+            let old_effective = match effective_gas_price_for_tx(state, old_tx_id, base_fee) {
+                Ok(value) => value,
+                Err(_) => return Err(ChainError::NonceConflict),
+            };
+            if effective_gas_price <= old_effective {
+                return Err(ChainError::NonceConflict);
+            }
+            replace_pending_for_sender(state, sender_key, old_tx_id);
+        }
         state.seen_tx.insert(tx_id, 1);
         state.tx_store.insert(tx_id, envelope);
+        state.pending_current_by_sender.insert(sender_key, tx_id);
         let mut metrics = *state.metrics_state.get();
         metrics.record_submission(1);
         state.metrics_state.set(metrics);
@@ -255,15 +276,18 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                 continue;
             }
         };
-        if envelope.validate().is_err() {
-            with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
-            track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_DECODE);
-            with_state_mut(|state| advance_sender_after_tx(state, tx_id, None, None));
-            continue;
-        }
-        let kind = envelope.kind();
+        let stored = match StoredTx::try_from(envelope) {
+            Ok(value) => value,
+            Err(_) => {
+                with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
+                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_DECODE);
+                with_state_mut(|state| advance_sender_after_tx(state, tx_id, None, None));
+                continue;
+            }
+        };
+        let kind = stored.kind;
         let caller = match kind {
-            TxKind::IcSynthetic => match envelope.caller_evm() {
+            TxKind::IcSynthetic => match stored.caller_evm {
                 Some(value) => value,
                 None => {
                     with_state_mut(|state| {
@@ -276,7 +300,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             },
             TxKind::EthSigned => [0u8; 20],
         };
-        let tx_env = match decode_tx(kind, Address::from(caller), envelope.raw()) {
+        let tx_env = match decode_tx(kind, Address::from(caller), raw_bytes(&stored.raw)) {
             Ok(value) => value,
             Err(_) => {
                 with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
@@ -396,13 +420,13 @@ pub fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResult, ChainError> {
 }
 
 pub fn execute_ic_tx(
-    caller: [u8; 20],
     caller_principal: Vec<u8>,
     canister_id: Vec<u8>,
     tx_bytes: Vec<u8>,
 ) -> Result<ExecResult, ChainError> {
-    let tx_id = submit_ic_tx(caller, caller_principal, canister_id, tx_bytes)?;
-    execute_and_seal_with_caller(tx_id, TxKind::IcSynthetic, caller)
+    let caller_evm = hash::caller_evm_from_principal(&caller_principal);
+    let tx_id = submit_ic_tx(caller_principal, canister_id, tx_bytes)?;
+    execute_and_seal_with_caller(tx_id, TxKind::IcSynthetic, caller_evm)
 }
 
 pub fn get_block(number: u64) -> Option<BlockData> {
@@ -417,7 +441,7 @@ pub fn get_receipt(tx_id: &TxId) -> Option<ReceiptLike> {
     with_state(|state| state.receipts.get(tx_id))
 }
 
-pub fn get_tx_envelope(tx_id: &TxId) -> Option<StoredTx> {
+pub fn get_tx_envelope(tx_id: &TxId) -> Option<StoredTxBytes> {
     with_state(|state| state.tx_store.get(tx_id))
 }
 
@@ -432,13 +456,14 @@ fn execute_and_seal_with_caller(
 ) -> Result<ExecResult, ChainError> {
     let envelope =
         with_state(|state| state.tx_store.get(&tx_id)).ok_or(ChainError::ExecFailed(None))?;
+    let stored = StoredTx::try_from(envelope).map_err(|_| ChainError::DecodeFailed)?;
 
     let head = with_state(|state| *state.head.get());
     let number = head.number.saturating_add(1);
     let timestamp = head.timestamp.saturating_add(1);
     let parent_hash = head.block_hash;
 
-    let tx_env = decode_tx(kind, Address::from(caller), envelope.raw())
+    let tx_env = decode_tx(kind, Address::from(caller), raw_bytes(&stored.raw))
         .map_err(|_| ChainError::DecodeFailed)?;
     let sender_bytes = address_to_bytes(tx_env.caller);
     let sender_nonce = tx_env.nonce;
@@ -598,12 +623,14 @@ pub fn get_queue_snapshot(limit: usize, cursor: Option<u64>) -> QueueSnapshot {
             }
             let seq = entry.key().seq();
             let tx_id = entry.value();
-            let kind = state
-                .tx_store
-                .get(&tx_id)
-                .map(|e| e.kind())
-                .unwrap_or(TxKind::EthSigned);
-            items.push(QueueItem { seq, tx_id, kind });
+            let stored = match state.tx_store.get(&tx_id).and_then(|e| StoredTx::try_from(e).ok()) {
+                Some(value) => value,
+                None => {
+                    seen = seen.saturating_add(1);
+                    continue;
+                }
+            };
+            items.push(QueueItem { seq, tx_id, kind: stored.kind });
             seen = seen.saturating_add(1);
         }
         QueueSnapshot { items, next_cursor }
@@ -678,6 +705,7 @@ fn advance_sender_after_tx(
         },
     };
     state.pending_by_sender_nonce.remove(&pending_key);
+    finalize_pending_for_sender(state, pending_key.sender, tx_id);
     let sender = pending_key.sender;
     if state.pending_min_nonce.get(&sender) != Some(pending_key.nonce) {
         return;
@@ -718,6 +746,7 @@ fn drop_invalid_fee_pending(
     remove_ready_by_tx_id(state, tx_id);
     if let Some(pending_key) = state.pending_meta_by_tx_id.remove(&tx_id) {
         state.pending_by_sender_nonce.remove(&pending_key);
+        finalize_pending_for_sender(state, pending_key.sender, tx_id);
     }
     state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_INVALID_FEE));
     if let (Some(total), Some(by_code)) = (dropped_total, dropped_by_code) {
@@ -738,6 +767,7 @@ fn drop_invalid_fee_pending_decode(
     remove_ready_by_tx_id(state, tx_id);
     if let Some(pending_key) = state.pending_meta_by_tx_id.remove(&tx_id) {
         state.pending_by_sender_nonce.remove(&pending_key);
+        finalize_pending_for_sender(state, pending_key.sender, tx_id);
     }
     state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE));
     if let (Some(total), Some(by_code)) = (dropped_total, dropped_by_code) {
@@ -773,14 +803,12 @@ fn load_effective_fee_and_seq(
         Some(value) => value,
         None => return Ok(None),
     };
-    if envelope.validate().is_err() {
-        return Err(RekeyError::DecodeFailed);
-    }
-    let kind = envelope.kind();
-    if kind == TxKind::IcSynthetic && envelope.caller_evm().is_none() {
-        return Err(RekeyError::DecodeFailed);
-    }
-    let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee) = envelope.fee_fields();
+    let stored = StoredTx::try_from(envelope).map_err(|_| RekeyError::DecodeFailed)?;
+    let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee) = (
+        stored.fee.max_fee_per_gas,
+        stored.fee.max_priority_fee_per_gas,
+        stored.fee.is_dynamic_fee,
+    );
     let chain_state = state.chain_state.get();
     let base_fee = chain_state.base_fee;
     let min_gas_price = chain_state.min_gas_price;
@@ -812,6 +840,94 @@ fn address_to_bytes(address: Address) -> [u8; 20] {
     let mut out = [0u8; 20];
     out.copy_from_slice(address.as_ref());
     out
+}
+
+fn account_nonce_from_state(
+    state: &evm_db::stable_state::StableState,
+    sender: SenderKey,
+) -> u64 {
+    // IcSynthetic の expected_nonce 初期化に使う（EVM stateのnonce）
+    let key = make_account_key(sender.0);
+    state.accounts.get(&key).map(|value| value.nonce()).unwrap_or(0)
+}
+
+fn expected_nonce_for_sender(
+    state: &mut evm_db::stable_state::StableState,
+    sender: SenderKey,
+) -> u64 {
+    // gap不許可のため、submit時に期待nonceを固定し、実行/ドロップ時にのみ進める。
+    if let Some(value) = state.sender_expected_nonce.get(&sender) {
+        return value;
+    }
+    let nonce = account_nonce_from_state(state, sender);
+    state.sender_expected_nonce.insert(sender, nonce);
+    nonce
+}
+
+fn bump_expected_nonce(
+    state: &mut evm_db::stable_state::StableState,
+    sender: SenderKey,
+) {
+    let current = state
+        .sender_expected_nonce
+        .get(&sender)
+        .unwrap_or_else(|| account_nonce_from_state(state, sender));
+    state
+        .sender_expected_nonce
+        .insert(sender, current.saturating_add(1));
+}
+
+fn finalize_pending_for_sender(
+    state: &mut evm_db::stable_state::StableState,
+    sender: SenderKey,
+    tx_id: TxId,
+) {
+    if let Some(current) = state.pending_current_by_sender.get(&sender) {
+        if current == tx_id {
+            state.pending_current_by_sender.remove(&sender);
+            bump_expected_nonce(state, sender);
+        }
+    }
+}
+
+fn raw_bytes(raw: &RawTx) -> &Vec<u8> {
+    match raw {
+        RawTx::Eth2718(bytes) | RawTx::IcSynthetic(bytes) => bytes,
+    }
+}
+
+fn effective_gas_price_for_tx(
+    state: &evm_db::stable_state::StableState,
+    tx_id: TxId,
+    base_fee: u64,
+) -> Result<u64, ChainError> {
+    let envelope = state.tx_store.get(&tx_id).ok_or(ChainError::NonceConflict)?;
+    let stored = StoredTx::try_from(envelope).map_err(|_| ChainError::NonceConflict)?;
+    let max_fee_per_gas = stored.fee.max_fee_per_gas;
+    let max_priority_fee_per_gas = stored.fee.max_priority_fee_per_gas;
+    let is_dynamic_fee = stored.fee.is_dynamic_fee;
+    compute_effective_gas_price(
+        max_fee_per_gas,
+        if is_dynamic_fee { max_priority_fee_per_gas } else { 0 },
+        base_fee,
+    )
+    .ok_or(ChainError::NonceConflict)
+}
+
+fn replace_pending_for_sender(
+    state: &mut evm_db::stable_state::StableState,
+    sender: SenderKey,
+    old_tx_id: TxId,
+) {
+    remove_ready_by_tx_id(state, old_tx_id);
+    if let Some(pending_key) = state.pending_meta_by_tx_id.remove(&old_tx_id) {
+        state.pending_by_sender_nonce.remove(&pending_key);
+    }
+    state.pending_current_by_sender.remove(&sender);
+    state.tx_locs.insert(old_tx_id, TxLoc::dropped(DROP_CODE_REPLACED));
+    let mut metrics = *state.metrics_state.get();
+    metrics.record_drop(DROP_CODE_REPLACED, 1);
+    state.metrics_state.set(metrics);
 }
 
 fn min_fee_satisfied(
@@ -927,14 +1043,12 @@ fn load_effective_fee_and_seq_with_base_fee(
         Some(value) => value,
         None => return Ok(None),
     };
-    if envelope.validate().is_err() {
-        return Err(RekeyError::DecodeFailed);
-    }
-    let kind = envelope.kind();
-    if kind == TxKind::IcSynthetic && envelope.caller_evm().is_none() {
-        return Err(RekeyError::DecodeFailed);
-    }
-    let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee) = envelope.fee_fields();
+    let stored = StoredTx::try_from(envelope).map_err(|_| RekeyError::DecodeFailed)?;
+    let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee) = (
+        stored.fee.max_fee_per_gas,
+        stored.fee.max_priority_fee_per_gas,
+        stored.fee.is_dynamic_fee,
+    );
     let min_gas_price = state.chain_state.get().min_gas_price;
     let min_priority_fee = state.chain_state.get().min_priority_fee;
     if !min_fee_satisfied_from_fields(

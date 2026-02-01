@@ -2,25 +2,27 @@
 
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{
-    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, StoredTx, TxId,
-    TxIndexEntry, TxKind, TxLoc,
+    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, StoredTx, StoredTxBytes,
+    TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use ic_stable_structures::Storable;
 
 #[test]
 fn tx_envelope_roundtrip() {
     let tx_id = TxId([0x11u8; 32]);
-    let envelope = StoredTx::new_with_fees(
+    let envelope = StoredTxBytes::new_with_fees(
         tx_id,
         TxKind::IcSynthetic,
         vec![1, 2, 3],
         Some([0x22u8; 20]),
+        vec![0x01],
+        vec![0x02],
         2_000_000_000u128,
         1_000_000_000u128,
         true,
     );
     let bytes = envelope.to_bytes();
-    let decoded = StoredTx::from_bytes(bytes);
+    let decoded = StoredTxBytes::from_bytes(bytes);
     assert_eq!(envelope, decoded);
 }
 
@@ -29,11 +31,29 @@ fn tx_envelope_rejects_unsupported_version_without_trap() {
     let mut bytes = Vec::new();
     bytes.push(1u8);
     bytes.extend_from_slice(&[0u8; 10]);
-    let decoded = StoredTx::from_bytes(bytes.into());
+    let decoded = StoredTxBytes::from_bytes(bytes.into());
     assert!(decoded.is_invalid());
     assert!(decoded.validate().is_err());
     assert_eq!(decoded.kind(), TxKind::EthSigned);
     assert_ne!(decoded.tx_id().0, [0u8; 32]);
+}
+
+#[test]
+fn stored_tx_rejects_tx_id_mismatch() {
+    let tx_id = TxId([0x33u8; 32]);
+    let bytes = StoredTxBytes::new_with_fees(
+        tx_id,
+        TxKind::EthSigned,
+        vec![0x01],
+        None,
+        Vec::new(),
+        Vec::new(),
+        1,
+        0,
+        false,
+    );
+    let result = StoredTx::try_from(bytes);
+    assert!(result.is_err());
 }
 
 #[test]

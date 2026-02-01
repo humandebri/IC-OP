@@ -1,15 +1,14 @@
 //! どこで: canister入口 / 何を: Phase1のAPI公開 / なぜ: ICPから同期Tx実行を提供するため
 
-use candid::{CandidType, Principal};
+use candid::CandidType;
 use ic_cdk::api::debug_print;
 use evm_db::meta::init_meta_or_trap;
 use evm_db::chain_data::constants::MAX_RETURN_DATA;
 use evm_db::chain_data::constants::CHAIN_ID;
-use evm_db::chain_data::{BlockData, ReceiptLike, StoredTx, TxId, TxKind, TxLoc, TxLocKind};
+use evm_db::chain_data::{BlockData, RawTx, ReceiptLike, StoredTx, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind};
 use evm_db::stable_state::{init_stable_state, with_state};
 use evm_db::upgrade;
 use evm_core::chain;
-use evm_core::hash::keccak256;
 use serde::Deserialize;
 
 #[cfg(target_arch = "wasm32")]
@@ -261,6 +260,12 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> 
         Err(chain::ChainError::InvalidFee) => {
             return Err(ExecuteTxError::Rejected("invalid fee".to_string()));
         }
+        Err(chain::ChainError::NonceTooLow) => {
+            return Err(ExecuteTxError::Rejected("nonce too low".to_string()));
+        }
+        Err(chain::ChainError::NonceGap) => {
+            return Err(ExecuteTxError::Rejected("nonce gap".to_string()));
+        }
         Err(chain::ChainError::NonceConflict) => {
             return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
         }
@@ -284,10 +289,9 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> 
 
 #[ic_cdk::update]
 fn execute_ic_tx(tx_bytes: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
-    let caller = principal_to_evm_address(ic_cdk::api::msg_caller());
     let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
     let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
-    let result = match chain::execute_ic_tx(caller, caller_principal, canister_id, tx_bytes) {
+    let result = match chain::execute_ic_tx(caller_principal, canister_id, tx_bytes) {
         Ok(value) => value,
         Err(chain::ChainError::DecodeFailed) => {
             return Err(ExecuteTxError::InvalidArgument("decode failed".to_string()));
@@ -338,6 +342,12 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         Err(chain::ChainError::InvalidFee) => {
             return Err(SubmitTxError::Rejected("invalid fee".to_string()));
         }
+        Err(chain::ChainError::NonceTooLow) => {
+            return Err(SubmitTxError::Rejected("nonce too low".to_string()));
+        }
+        Err(chain::ChainError::NonceGap) => {
+            return Err(SubmitTxError::Rejected("nonce gap".to_string()));
+        }
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
         }
@@ -352,10 +362,9 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
 
 #[ic_cdk::update]
 fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
-    let caller = principal_to_evm_address(ic_cdk::api::msg_caller());
     let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
     let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
-    let tx_id = match chain::submit_ic_tx(caller, caller_principal, canister_id, tx_bytes) {
+    let tx_id = match chain::submit_ic_tx(caller_principal, canister_id, tx_bytes) {
         Ok(value) => value,
         Err(chain::ChainError::TxTooLarge) => {
             return Err(SubmitTxError::InvalidArgument("tx too large".to_string()));
@@ -666,13 +675,6 @@ fn get_pending(tx_id: Vec<u8>) -> PendingStatusView {
     pending_to_view(loc)
 }
 
-fn principal_to_evm_address(principal: Principal) -> [u8; 20] {
-    let hash = keccak256(principal.as_slice());
-    let mut out = [0u8; 20];
-    out.copy_from_slice(&hash[12..32]);
-    out
-}
-
 fn block_to_view(block: BlockData) -> BlockView {
     let mut tx_ids = Vec::with_capacity(block.tx_ids.len());
     for tx_id in block.tx_ids.into_iter() {
@@ -805,17 +807,18 @@ fn tx_to_view(tx_id: TxId) -> Option<EthTxView> {
 }
 
 fn envelope_to_eth_view(
-    envelope: StoredTx,
+    envelope: StoredTxBytes,
     block_number: Option<u64>,
     tx_index: Option<u32>,
 ) -> Option<EthTxView> {
-    let kind = envelope.kind();
+    let stored = StoredTx::try_from(envelope).ok()?;
+    let kind = stored.kind;
     let caller = match kind {
-        TxKind::IcSynthetic => envelope.caller_evm().unwrap_or([0u8; 20]),
+        TxKind::IcSynthetic => stored.caller_evm.unwrap_or([0u8; 20]),
         TxKind::EthSigned => [0u8; 20],
     };
     let decoded = if let Ok(decoded) =
-        evm_core::tx_decode::decode_tx_view(kind, caller, envelope.raw())
+        evm_core::tx_decode::decode_tx_view(kind, caller, raw_bytes(&stored.raw))
     {
         Some(DecodedTxView {
             from: decoded.from.to_vec(),
@@ -832,14 +835,20 @@ fn envelope_to_eth_view(
     };
 
     Some(EthTxView {
-        hash: envelope.tx_id().0.to_vec(),
+        hash: stored.tx_id.0.to_vec(),
         kind: tx_kind_to_view(kind),
-        raw: envelope.raw().clone(),
+        raw: raw_bytes(&stored.raw).clone(),
         decode_ok: decoded.is_some(),
         decoded,
         block_number,
         tx_index,
     })
+}
+
+fn raw_bytes(raw: &RawTx) -> &Vec<u8> {
+    match raw {
+        RawTx::Eth2718(bytes) | RawTx::IcSynthetic(bytes) => bytes,
+    }
 }
 
 fn receipt_to_eth_view(receipt: ReceiptLike) -> EthReceiptView {

@@ -1,9 +1,14 @@
-//! どこで: Phase1のTxモデル / 何を: StoredTxとID / なぜ: stableは生bytesを安全に保持するため
+//! どこで: Phase1のTxモデル / 何を: StoredTxBytesとID / なぜ: stableは生bytesを安全に保持するため
 
-use crate::chain_data::constants::{MAX_TX_SIZE, TX_ID_LEN, TX_ID_LEN_U32, MAX_TX_SIZE_U32};
+use crate::chain_data::constants::{
+    MAX_PRINCIPAL_LEN, MAX_TX_SIZE, TX_ID_LEN, TX_ID_LEN_U32, MAX_TX_SIZE_U32,
+};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use tiny_keccak::{Hasher, Keccak};
+
+const MAX_STORED_PRINCIPAL_LEN: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TxId(pub [u8; TX_ID_LEN]);
@@ -33,54 +38,91 @@ impl Storable for TxId {
     };
 }
 
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TxKind {
-    EthSigned = 0,
-    IcSynthetic = 1,
+    EthSigned,
+    IcSynthetic,
 }
 
 impl TxKind {
     pub fn to_u8(self) -> u8 {
         match self {
-            TxKind::EthSigned => 0,
-            TxKind::IcSynthetic => 1,
+            TxKind::EthSigned => 0x01,
+            TxKind::IcSynthetic => 0x02,
         }
     }
 
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => Some(TxKind::EthSigned),
-            1 => Some(TxKind::IcSynthetic),
+            0x01 => Some(TxKind::EthSigned),
+            0x02 => Some(TxKind::IcSynthetic),
             _ => None,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FeeFields {
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub is_dynamic_fee: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoredTx {
+pub struct StoredTxBytes {
     pub version: u8,
     pub tx_id: TxId,
     pub kind: TxKind,
     pub raw: Vec<u8>,
     pub caller_evm: Option<[u8; 20]>,
-    pub max_fee_per_gas: u128,
-    pub max_priority_fee_per_gas: u128,
-    pub is_dynamic_fee: bool,
+    pub canister_id: Vec<u8>,
+    pub caller_principal: Vec<u8>,
+    pub fee: FeeFields,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredTxBytesError {
+    UnsupportedVersion(u8),
+    InvalidLength,
+    InvalidKind,
+    DataTooLarge,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RawTx {
+    Eth2718(Vec<u8>),
+    IcSynthetic(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredTx {
+    pub kind: TxKind,
+    pub raw: RawTx,
+    pub caller_evm: Option<[u8; 20]>,
+    pub canister_id: Vec<u8>,
+    pub caller_principal: Vec<u8>,
+    pub fee: FeeFields,
+    pub tx_id: TxId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredTxError {
     UnsupportedVersion(u8),
     EmptyBytes,
+    MissingCaller,
+    MissingPrincipal,
+    CallerMismatch,
+    TxIdMismatch,
 }
 
-impl StoredTx {
+impl StoredTxBytes {
     pub fn new_with_fees(
         tx_id: TxId,
         kind: TxKind,
         raw: Vec<u8>,
         caller_evm: Option<[u8; 20]>,
+        canister_id: Vec<u8>,
+        caller_principal: Vec<u8>,
         max_fee_per_gas: u128,
         max_priority_fee_per_gas: u128,
         is_dynamic_fee: bool,
@@ -91,9 +133,13 @@ impl StoredTx {
             kind,
             raw,
             caller_evm,
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-            is_dynamic_fee,
+            canister_id,
+            caller_principal,
+            fee: FeeFields {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                is_dynamic_fee,
+            },
         }
     }
 
@@ -115,9 +161,9 @@ impl StoredTx {
 
     pub fn fee_fields(&self) -> (u128, u128, bool) {
         (
-            self.max_fee_per_gas,
-            self.max_priority_fee_per_gas,
-            self.is_dynamic_fee,
+            self.fee.max_fee_per_gas,
+            self.fee.max_priority_fee_per_gas,
+            self.fee.is_dynamic_fee,
         )
     }
 
@@ -136,7 +182,70 @@ impl StoredTx {
     }
 }
 
-impl Storable for StoredTx {
+impl TryFrom<StoredTxBytes> for StoredTx {
+    type Error = StoredTxError;
+
+    fn try_from(value: StoredTxBytes) -> Result<Self, Self::Error> {
+        if value.version != 2 {
+            return Err(StoredTxError::UnsupportedVersion(value.version));
+        }
+        if value.raw.is_empty() {
+            return Err(StoredTxError::EmptyBytes);
+        }
+        if value.kind == TxKind::IcSynthetic && value.caller_evm.is_none() {
+            return Err(StoredTxError::MissingCaller);
+        }
+        if value.kind == TxKind::IcSynthetic
+            && (value.canister_id.is_empty() || value.caller_principal.is_empty())
+        {
+            return Err(StoredTxError::MissingPrincipal);
+        }
+        if value.kind == TxKind::EthSigned
+            && (!value.canister_id.is_empty() || !value.caller_principal.is_empty())
+        {
+            return Err(StoredTxError::MissingPrincipal);
+        }
+        let expected = stored_tx_id(
+            value.kind,
+            &value.raw,
+            value.caller_evm,
+            if value.kind == TxKind::IcSynthetic {
+                Some(value.canister_id.as_slice())
+            } else {
+                None
+            },
+            if value.kind == TxKind::IcSynthetic {
+                Some(value.caller_principal.as_slice())
+            } else {
+                None
+            },
+        );
+        if value.tx_id.0 != expected {
+            return Err(StoredTxError::TxIdMismatch);
+        }
+        if value.kind == TxKind::IcSynthetic {
+            let derived = caller_evm_from_principal(value.caller_principal.as_slice());
+            if value.caller_evm != Some(derived) {
+                return Err(StoredTxError::CallerMismatch);
+            }
+        }
+        let raw = match value.kind {
+            TxKind::EthSigned => RawTx::Eth2718(value.raw),
+            TxKind::IcSynthetic => RawTx::IcSynthetic(value.raw),
+        };
+        Ok(StoredTx {
+            kind: value.kind,
+            raw,
+            caller_evm: value.caller_evm,
+            canister_id: value.canister_id,
+            caller_principal: value.caller_principal,
+            fee: value.fee,
+            tx_id: value.tx_id,
+        })
+    }
+}
+
+impl Storable for StoredTxBytes {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(encode(self))
     }
@@ -160,7 +269,19 @@ impl Storable for StoredTx {
     }
 
     const BOUND: Bound = Bound::Bounded {
-        max_size: 1 + 1 + TX_ID_LEN_U32 + 1 + 20 + 16 + 16 + 4 + MAX_TX_SIZE_U32,
+        max_size: 1
+            + 1
+            + TX_ID_LEN_U32
+            + 1
+            + 20
+            + 16
+            + 16
+            + 2
+            + MAX_PRINCIPAL_LEN as u32
+            + 2
+            + MAX_PRINCIPAL_LEN as u32
+            + 4
+            + MAX_TX_SIZE_U32,
         is_fixed_size: false,
     };
 }
@@ -169,18 +290,22 @@ struct DecodeFailure<'a> {
     raw: &'a [u8],
 }
 
-fn invalid_stored_tx(version: u8, raw: &[u8]) -> StoredTx {
+fn invalid_stored_tx(version: u8, raw: &[u8]) -> StoredTxBytes {
     // 旧形式や外部入力をtrapせず安全にrejectするための無効レコード。
     let tx_id = TxId(placeholder_hash(raw));
-    StoredTx {
+    StoredTxBytes {
         version,
         tx_id,
         kind: TxKind::EthSigned,
         raw: Vec::new(),
         caller_evm: None,
-        max_fee_per_gas: 0,
-        max_priority_fee_per_gas: 0,
-        is_dynamic_fee: false,
+        canister_id: Vec::new(),
+        caller_principal: Vec::new(),
+        fee: FeeFields {
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            is_dynamic_fee: false,
+        },
     }
 }
 
@@ -199,8 +324,13 @@ fn placeholder_hash(raw: &[u8]) -> [u8; TX_ID_LEN] {
     out
 }
 
-fn encode(inner: &StoredTx) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 1 + TX_ID_LEN + 1 + 20 + 16 + 16 + 4 + inner.raw.len());
+fn encode(inner: &StoredTxBytes) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        1 + 1 + TX_ID_LEN + 1 + 20 + 16 + 16 + 2 + inner.canister_id.len() + 2
+            + inner.caller_principal.len()
+            + 4
+            + inner.raw.len(),
+    );
     out.push(inner.version);
     out.push(inner.kind.to_u8());
     out.extend_from_slice(&inner.tx_id.0);
@@ -208,21 +338,29 @@ fn encode(inner: &StoredTx) -> Vec<u8> {
     if inner.caller_evm.is_some() {
         flags |= 1 << 0;
     }
-    if inner.is_dynamic_fee {
+    if inner.fee.is_dynamic_fee {
         flags |= 1 << 1;
     }
     out.push(flags);
     let caller = inner.caller_evm.unwrap_or([0u8; 20]);
     out.extend_from_slice(&caller);
-    out.extend_from_slice(&inner.max_fee_per_gas.to_be_bytes());
-    out.extend_from_slice(&inner.max_priority_fee_per_gas.to_be_bytes());
+    out.extend_from_slice(&inner.fee.max_fee_per_gas.to_be_bytes());
+    out.extend_from_slice(&inner.fee.max_priority_fee_per_gas.to_be_bytes());
+    let canister_len =
+        u16::try_from(inner.canister_id.len()).unwrap_or_else(|_| ic_cdk::trap("tx_envelope: canister_id len overflow"));
+    out.extend_from_slice(&canister_len.to_be_bytes());
+    out.extend_from_slice(&inner.canister_id);
+    let principal_len =
+        u16::try_from(inner.caller_principal.len()).unwrap_or_else(|_| ic_cdk::trap("tx_envelope: caller_principal len overflow"));
+    out.extend_from_slice(&principal_len.to_be_bytes());
+    out.extend_from_slice(&inner.caller_principal);
     let len = len_to_u32(inner.raw.len(), "tx_envelope: len overflow");
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&inner.raw);
     out
 }
 
-fn decode_result(data: &[u8]) -> Result<StoredTx, DecodeFailure<'_>> {
+fn decode_result(data: &[u8]) -> Result<StoredTxBytes, DecodeFailure<'_>> {
     if data.len() < 1 + 1 + TX_ID_LEN + 1 + 20 + 16 + 16 + 4 {
         return Err(DecodeFailure { raw: data });
     }
@@ -250,6 +388,31 @@ fn decode_result(data: &[u8]) -> Result<StoredTx, DecodeFailure<'_>> {
     let mut max_priority = [0u8; 16];
     max_priority.copy_from_slice(&data[offset..offset + 16]);
     offset += 16;
+    let mut canister_len_bytes = [0u8; 2];
+    canister_len_bytes.copy_from_slice(&data[offset..offset + 2]);
+    offset += 2;
+    let canister_len = u16::from_be_bytes(canister_len_bytes) as usize;
+    let principal_limit = MAX_PRINCIPAL_LEN.min(MAX_STORED_PRINCIPAL_LEN);
+    if canister_len > principal_limit {
+        return Err(DecodeFailure { raw: data });
+    }
+    if data.len() < offset + canister_len + 2 {
+        return Err(DecodeFailure { raw: data });
+    }
+    let canister_id = data[offset..offset + canister_len].to_vec();
+    offset += canister_len;
+    let mut principal_len_bytes = [0u8; 2];
+    principal_len_bytes.copy_from_slice(&data[offset..offset + 2]);
+    offset += 2;
+    let principal_len = u16::from_be_bytes(principal_len_bytes) as usize;
+    if principal_len > principal_limit {
+        return Err(DecodeFailure { raw: data });
+    }
+    if data.len() < offset + principal_len + 4 {
+        return Err(DecodeFailure { raw: data });
+    }
+    let caller_principal = data[offset..offset + principal_len].to_vec();
+    offset += principal_len;
     let mut len_bytes = [0u8; 4];
     len_bytes.copy_from_slice(&data[offset..offset + 4]);
     offset += 4;
@@ -267,16 +430,62 @@ fn decode_result(data: &[u8]) -> Result<StoredTx, DecodeFailure<'_>> {
     let raw = data[offset..].to_vec();
     let caller_evm = if (flags & (1 << 0)) != 0 { Some(caller) } else { None };
     let is_dynamic_fee = (flags & (1 << 1)) != 0;
-    Ok(StoredTx {
+    Ok(StoredTxBytes {
         version,
         tx_id: TxId(tx_id),
         kind,
         raw,
         caller_evm,
-        max_fee_per_gas: u128::from_be_bytes(max_fee),
-        max_priority_fee_per_gas: u128::from_be_bytes(max_priority),
-        is_dynamic_fee,
+        canister_id,
+        caller_principal,
+        fee: FeeFields {
+            max_fee_per_gas: u128::from_be_bytes(max_fee),
+            max_priority_fee_per_gas: u128::from_be_bytes(max_priority),
+            is_dynamic_fee,
+        },
     })
+}
+
+fn stored_tx_id(
+    kind: TxKind,
+    raw: &[u8],
+    caller_evm: Option<[u8; 20]>,
+    canister_id: Option<&[u8]>,
+    caller_principal: Option<&[u8]>,
+) -> [u8; TX_ID_LEN] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"ic-evm:storedtx:v2");
+    buf.push(kind.to_u8());
+    buf.extend_from_slice(raw);
+    if let Some(caller) = caller_evm {
+        buf.extend_from_slice(&caller);
+    }
+    if let Some(bytes) = canister_id {
+        let len = u16::try_from(bytes.len()).unwrap_or(0);
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    if let Some(bytes) = caller_principal {
+        let len = u16::try_from(bytes.len()).unwrap_or(0);
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    let mut out = [0u8; TX_ID_LEN];
+    let mut hasher = Keccak::v256();
+    hasher.update(&buf);
+    hasher.finalize(&mut out);
+    out
+}
+
+fn caller_evm_from_principal(principal_bytes: &[u8]) -> [u8; 20] {
+    let mut hash = [0u8; TX_ID_LEN];
+    let mut hasher = Keccak::v256();
+    hasher.update(b"ic-evm:caller_evm:v1");
+    hasher.update(principal_bytes);
+    hasher.finalize(&mut hash);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&hash[12..32]);
+    out
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

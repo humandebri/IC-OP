@@ -1,5 +1,6 @@
 //! どこで: Phase1のハッシュ規則 / 何を: tx_id/tx_list_hash/block_hash / なぜ: 決定性を保証するため
 
+use evm_db::chain_data::TxKind;
 use tiny_keccak::{Hasher, Keccak};
 
 pub const HASH_LEN: usize = 32;
@@ -12,27 +13,42 @@ pub fn keccak256(data: &[u8]) -> [u8; HASH_LEN] {
     out
 }
 
-pub fn tx_id(tx_bytes: &[u8]) -> [u8; HASH_LEN] {
-    keccak256(tx_bytes)
+pub fn stored_tx_id(
+    kind: TxKind,
+    raw: &[u8],
+    caller_evm: Option<[u8; 20]>,
+    canister_id: Option<&[u8]>,
+    caller_principal: Option<&[u8]>,
+) -> [u8; HASH_LEN] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"ic-evm:storedtx:v2");
+    buf.push(kind.to_u8());
+    buf.extend_from_slice(raw);
+    if let Some(caller) = caller_evm {
+        buf.extend_from_slice(&caller);
+    }
+    if let Some(bytes) = canister_id {
+        let len = u16::try_from(bytes.len()).unwrap_or(0);
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    if let Some(bytes) = caller_principal {
+        let len = u16::try_from(bytes.len()).unwrap_or(0);
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    keccak256(&buf)
 }
 
-pub fn ic_synthetic_tx_id(
-    chain_id: u64,
-    canister_id: &[u8],
-    caller_principal: &[u8],
-    caller_nonce: u64,
-    payload: &[u8],
-) -> [u8; HASH_LEN] {
-    let payload_hash = keccak256(payload);
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"icp-evm:synthetic-tx");
-    buf.push(0x01);
-    buf.extend_from_slice(&chain_id.to_be_bytes());
-    buf.extend_from_slice(canister_id);
-    buf.extend_from_slice(caller_principal);
-    buf.extend_from_slice(&caller_nonce.to_be_bytes());
-    buf.extend_from_slice(&payload_hash);
-    keccak256(&buf)
+pub fn caller_evm_from_principal(principal_bytes: &[u8]) -> [u8; 20] {
+    let mut hash = [0u8; HASH_LEN];
+    let mut hasher = Keccak::v256();
+    hasher.update(b"ic-evm:caller_evm:v1");
+    hasher.update(principal_bytes);
+    hasher.finalize(&mut hash);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&hash[12..32]);
+    out
 }
 
 pub fn tx_list_hash(tx_ids: &[[u8; HASH_LEN]]) -> [u8; HASH_LEN] {

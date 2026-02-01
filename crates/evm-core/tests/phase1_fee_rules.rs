@@ -16,7 +16,7 @@ fn min_priority_fee_rejects_low_tip() {
     });
 
     let tx_bytes = build_ic_tx_bytes(3_000_000_000, 1_000_000_000, 0);
-    let err = chain::submit_ic_tx([0x11u8; 20], vec![0x11], vec![0x01], tx_bytes)
+    let err = chain::submit_ic_tx(vec![0x11], vec![0x01], tx_bytes)
         .expect_err("submit should fail");
     assert_eq!(err, ChainError::InvalidFee);
 }
@@ -32,7 +32,7 @@ fn base_fee_rekey_drops_unaffordable_tx() {
     });
 
     let tx_bytes = build_ic_tx_bytes(2_000_000_000, 1_000_000_000, 0);
-    let tx_id = chain::submit_ic_tx([0x22u8; 20], vec![0x22], vec![0x02], tx_bytes)
+    let tx_id = chain::submit_ic_tx(vec![0x22], vec![0x02], tx_bytes)
         .expect("submit");
 
     with_state_mut(|state| {
@@ -62,8 +62,8 @@ fn base_fee_rekey_reorders_by_effective_fee() {
     let tx_a = build_ic_tx_bytes(6_000_000_000, 3_000_000_000, 0);
     let tx_b = build_ic_tx_bytes(10_000_000_000, 2_000_000_000, 0);
 
-    let a_id = chain::submit_ic_tx([0x33u8; 20], vec![0x33], vec![0x03], tx_a).expect("submit a");
-    let b_id = chain::submit_ic_tx([0x44u8; 20], vec![0x44], vec![0x04], tx_b).expect("submit b");
+    let a_id = chain::submit_ic_tx(vec![0x33], vec![0x03], tx_a).expect("submit a");
+    let b_id = chain::submit_ic_tx(vec![0x44], vec![0x04], tx_b).expect("submit b");
 
     with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
@@ -90,8 +90,8 @@ fn equal_fee_uses_seq_order() {
     let tx_a = build_ic_tx_bytes(2_000_000_000, 1_000_000_000, 0);
     let tx_b = build_ic_tx_bytes(2_000_000_000, 1_000_000_000, 0);
 
-    let a_id = chain::submit_ic_tx([0x55u8; 20], vec![0x55], vec![0x05], tx_a).expect("submit a");
-    let b_id = chain::submit_ic_tx([0x66u8; 20], vec![0x66], vec![0x06], tx_b).expect("submit b");
+    let a_id = chain::submit_ic_tx(vec![0x55], vec![0x05], tx_a).expect("submit a");
+    let b_id = chain::submit_ic_tx(vec![0x66], vec![0x06], tx_b).expect("submit b");
 
     let block = chain::produce_block(2).expect("produce");
     assert_eq!(block.tx_ids.len(), 2);

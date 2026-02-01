@@ -12,7 +12,7 @@ Phase 0: 仕様凍結（手戻り防止フェーズ）
 
 凍結するもの（最重要）
 
-principal_to_evm_address（あなたの案でOK）
+caller_evm 導出ルール（"ic-evm:caller_evm:v1" || principal_bytes の keccak 末尾20byte）
 
 ICSyntheticのcanonical encoding（CBORならcanonical CBORを明記、個人的にはRLP/TLV推奨）
 

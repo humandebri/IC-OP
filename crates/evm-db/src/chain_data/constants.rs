@@ -45,6 +45,7 @@ pub const DROP_CODE_EXEC: u16 = 2;
 pub const DROP_CODE_MISSING: u16 = 3;
 pub const DROP_CODE_CALLER_MISSING: u16 = 4;
 pub const DROP_CODE_INVALID_FEE: u16 = 5;
+pub const DROP_CODE_REPLACED: u16 = 6;
 
 // logs/receiptの上限
 pub const MAX_LOGS_PER_TX: usize = 64;

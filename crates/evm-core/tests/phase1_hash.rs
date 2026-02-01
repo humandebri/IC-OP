@@ -1,18 +1,19 @@
 //! どこで: Phase1テスト / 何を: ハッシュ決定性 / なぜ: 再現性を保証するため
 
-use evm_core::hash::{block_hash, keccak256, tx_id, tx_list_hash};
+use evm_core::hash::{block_hash, keccak256, stored_tx_id, tx_list_hash};
+use evm_db::chain_data::TxKind;
 
 #[test]
 fn tx_id_is_deterministic() {
-    let a = tx_id(b"hello");
-    let b = tx_id(b"hello");
+    let a = stored_tx_id(TxKind::EthSigned, b"hello", None, None, None);
+    let b = stored_tx_id(TxKind::EthSigned, b"hello", None, None, None);
     assert_eq!(a, b);
 }
 
 #[test]
 fn tx_list_hash_depends_on_order() {
-    let a = tx_id(b"a");
-    let b = tx_id(b"b");
+    let a = stored_tx_id(TxKind::EthSigned, b"a", None, None, None);
+    let b = stored_tx_id(TxKind::EthSigned, b"b", None, None, None);
     let list1 = tx_list_hash(&[a, b]);
     let list2 = tx_list_hash(&[b, a]);
     assert_ne!(list1, list2);

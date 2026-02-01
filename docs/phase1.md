@@ -80,7 +80,7 @@ seen_tx で重複排除（stable）
 
 おすすめ：nonceは “EVMアカウントnonce” に統一する
 
-from = principal_to_evm_address(caller)（Phase0凍結）
+from = caller_evm_from_principal(caller)（Phase0凍結）
 
 stateのaccount.nonceをREVMが更新（Ethと同じ）
 
@@ -100,7 +100,7 @@ data_len: u32 (big-endian)
 data: [u8; data_len]
 chain_id: 4801360 (0x494350, "ICP") をTxEnv/CHAINIDに固定
 
-caller は principal を keccak256 して末尾20 bytes（Phase1暫定）
+caller は "ic-evm:caller_evm:v1" || principal_bytes の keccak256 末尾20 bytes（Phase1暫定）
 
 注記
 - Eth raw tx のデコードは未実装（Phase1の次段で追加予定）

@@ -3,7 +3,7 @@
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::chain_data::{
     BlockData, CallerKey, ChainStateV1, Head, MetricsStateV1, PruneStateV1, QueueMeta, ReceiptLike,
-    SenderKey, SenderNonceKey, StoredTx, TxId, TxIndexEntry, ReadyKey,
+    SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxIndexEntry, ReadyKey,
 };
 use crate::chain_data::constants::CHAIN_ID;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
@@ -16,7 +16,7 @@ pub type Storage = StableBTreeMap<StorageKey, U256Val, VMem>;
 pub type Codes = StableBTreeMap<CodeKey, CodeVal, VMem>;
 pub type Queue = StableBTreeMap<u64, TxId, VMem>;
 pub type SeenTx = StableBTreeMap<TxId, u8, VMem>;
-pub type TxStore = StableBTreeMap<TxId, StoredTx, VMem>;
+pub type TxStore = StableBTreeMap<TxId, StoredTxBytes, VMem>;
 pub type TxIndex = StableBTreeMap<TxId, TxIndexEntry, VMem>;
 pub type Receipts = StableBTreeMap<TxId, ReceiptLike, VMem>;
 pub type Blocks = StableBTreeMap<u64, BlockData, VMem>;
@@ -27,6 +27,8 @@ pub type ReadyKeyByTxId = StableBTreeMap<TxId, ReadyKey, VMem>;
 pub type PendingBySenderNonce = StableBTreeMap<SenderNonceKey, TxId, VMem>;
 pub type PendingMinNonce = StableBTreeMap<SenderKey, u64, VMem>;
 pub type PendingMetaByTxId = StableBTreeMap<TxId, SenderNonceKey, VMem>;
+pub type SenderExpectedNonce = StableBTreeMap<SenderKey, u64, VMem>;
+pub type PendingCurrentBySender = StableBTreeMap<SenderKey, TxId, VMem>;
 
 pub struct StableState {
     pub accounts: Accounts,
@@ -50,6 +52,8 @@ pub struct StableState {
     pub pending_by_sender_nonce: PendingBySenderNonce,
     pub pending_min_nonce: PendingMinNonce,
     pub pending_meta_by_tx_id: PendingMetaByTxId,
+    pub sender_expected_nonce: SenderExpectedNonce,
+    pub pending_current_by_sender: PendingCurrentBySender,
 }
 
 thread_local! {
@@ -89,6 +93,9 @@ pub fn init_stable_state() {
         StableBTreeMap::init(get_memory(AppMemoryId::PendingBySenderNonce));
     let pending_min_nonce = StableBTreeMap::init(get_memory(AppMemoryId::PendingMinNonce));
     let pending_meta_by_tx_id = StableBTreeMap::init(get_memory(AppMemoryId::PendingMetaByTxId));
+    let sender_expected_nonce = StableBTreeMap::init(get_memory(AppMemoryId::SenderExpectedNonce));
+    let pending_current_by_sender =
+        StableBTreeMap::init(get_memory(AppMemoryId::PendingCurrentBySender));
     STABLE_STATE.with(|s| {
         *s.borrow_mut() = Some(StableState {
             accounts,
@@ -112,6 +119,8 @@ pub fn init_stable_state() {
             pending_by_sender_nonce,
             pending_min_nonce,
             pending_meta_by_tx_id,
+            sender_expected_nonce,
+            pending_current_by_sender,
         });
     });
 }

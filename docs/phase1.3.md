@@ -238,6 +238,97 @@ min fee 条件だけ入れる（submitで弾く）
 
 並べ替え（fee desc, seq asc）だけ入れる（ただし nonce詰まりでdrop増える）
 
+---
+
+## IC Synthetic 仕様まとめ（Phase1.3）
+
+### 1) IcSynthetic payload 形式（v2固定）
+
+```
+[version:1=0x02]
+[to:20]
+[value:32]
+[gas_limit:8]
+[nonce:8]
+[max_fee_per_gas:16]
+[max_priority_fee_per_gas:16]
+[data_len:4]
+[data:data_len]
+```
+
+* 数値は **big-endian**。
+* `data_len` は `u32(be)`、`data_len <= MAX_TX_SIZE`。
+
+### 2) 保存構造（stable）
+
+stable には decode済みTxではなく **StoredTxBytes** を保存する。
+
+```
+version: u8 (=2)
+kind: TxKind (0x01=EthSigned, 0x02=IcSynthetic)
+raw: Vec<u8> (kind依存で解釈)
+fee: FeeFields (max_fee/max_priority/is_dynamic)
+caller_evm: Option<[u8;20]> (IcSynthetic必須)
+canister_id: Vec<u8> (IcSynthetic必須, principal bytes)
+caller_principal: Vec<u8> (IcSynthetic必須, principal bytes)
+tx_id: TxId (下記)
+```
+
+**重要**: stableの `raw` は `kind` に依存して解釈される。  
+domain層では `RawTx::{Eth2718, IcSynthetic}` に分離する。
+
+### 3) tx_id 生成ルール（固定）
+
+```
+tx_id = keccak256(
+  "ic-evm:storedtx:v2" || kind_u8 || raw ||
+  caller_evm? || len(canister_id)||canister_id || len(caller_principal)||caller_principal
+)
+```
+
+* `kind_u8`: **固定1byte**（0x01/0x02）
+* principalは **length prefix(u16be) + bytes**
+* `caller_evm` は `Some` の場合のみ 20 bytes を混ぜる
+
+### 3.5) caller_evm の導出ルール（固定, B案）
+
+```
+caller_evm = last20bytes(keccak256("ic-evm:caller_evm:v1" || principal_bytes))
+```
+
+* `principal_bytes = ic_cdk::caller().as_slice()`（**length prefix は付けない**）
+* keccak の入力は **domain_sep || principal_bytes** の単純連結
+* `last20bytes(hash) = hash[12..32]`（32 bytes の末尾20）
+
+### 4) decode と drop / reject
+
+* `Storable::from_bytes` は **trapしない**
+* invalid/旧データは **StoredTxBytes::invalid** として復元
+* service層で `StoredTx::try_from` を必ず通す  
+  → 失敗時は **drop_code=decode**
+
+### 5) fee 判定（rekey/ordering）
+
+* rekey/ready 判定は **fee_fieldsのみ**を使用（decode不要）
+* execute直前のみ decode（失敗時は drop_code=decode）
+
+### 6) EthSigned との違い
+
+* IcSynthetic は `caller_evm / canister_id / caller_principal` が必須
+* EthSigned は raw が EIP-2718、生caller/principalは空
+
+### 7) IcSynthetic の nonce 運用（固定）
+
+* nonce は **callerごとに厳密一致**（expected_nonce と一致しない場合は **submit時に reject**）
+* **gap は許容しない**（pendingで保持しない）
+* 同一nonceの置換は **fee↑のみ許可**（それ以外は NonceConflict）
+* 目的：nonce gap による詰まり/リプレイを予防する
+
+### 8) EthSigned の tx hash（運用/UX）
+
+* `tx_id` は内部IDとして保持
+* EVM互換の利用に備えて **`eth_tx_hash = keccak(raw)` を別途保持/返却**するのが望ましい
+
 senderごとのnonce待ち＋ready_queueに進化（ここで完成）
 
 最終的に 3) まで行かないなら、手数料並べ替えは “見た目だけ” になりがち。

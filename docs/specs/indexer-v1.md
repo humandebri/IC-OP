@@ -627,3 +627,98 @@ max_bytes（export取得上限）：1〜1.5MiB
 アーカイブ粒度：まずは 日次（後でブロック範囲にしてもよい）
 
 SQLite保持期間：インデックスは30〜90日、rawはObject Storageで長期
+---
+
+# Appendix: Indexer Worker v2 (SQLite-first) 運用仕様（実装ブレ防止）
+
+この章は **取得側（外部ワーカー）**の最小仕様を固定する。canister 側の export API 仕様（Cursor/Chunk/validation）は既存章に従う。
+
+## v2.1 目的（固定）
+
+* export API を pull して **外部インデックス（SQLite）**を構築する
+* 外部DBは キャッシュ（失っても canister から再構築可能）
+* pruning は外部ACKに依存しない（canister は単独で生存できる）
+
+## v2.2 永続 cursor 形式（固定）
+
+cursor は JSON で保存し、互換性と可読性を固定する。
+
+* DB meta テーブルの cursor キーに JSON bytes を保存する
+* JSON 内の構造は Cursor { block_number, segment, byte_offset } とし、CandidのCursor recordと同じ意味を持つ
+
+```
+Cursor {
+  block_number: u64,
+  segment: u8,      // 0=block, 1=receipts, 2=tx_index
+  byte_offset: u32  // payload offset (prefixは含めない)
+}
+```
+
+補足:
+
+* cursor が存在しない場合は None とみなす（初回同期）
+
+## v2.3 Pull ループのコミット境界（固定）
+
+取得側は以下を 不変条件として守る。
+
+* cursor 更新は SQLiteのトランザクション COMMIT と同じ境界でのみ行う
+* 取り込み（UPSERT）に失敗した場合は cursor を進めない
+* next_cursor は export 返却のものをそのまま採用（exclusive）
+
+## v2.4 追いつき時の扱い（スピン禁止・固定）
+
+canister の仕様として、追いつき時は chunks=[] かつ next_cursor=cursor を返す。
+
+取得側はこのケースで 必ず sleep/backoff し、スピン（busy loop）を禁止する。
+
+* 初期 sleep: 200ms
+* バックオフ: 指数（例: x2）
+* 上限: 5秒固定
+* chunks=[] が続く限り、sleep を挟んで再試行する
+
+## v2.5 エラー分類と停止条件（固定）
+
+取得側は以下のエラー分類を持つ。
+
+* Pruned: 停止（fatal）
+  * 理由: 要求範囲が canister 側で prune 済みであり、外部が欠けた状態からの回復手段が無い（cursor を進めても過去データは復元不能）
+* InvalidCursor: 停止（fatal）
+  * 理由: 取得側のバグまたは仕様不一致
+* Decode: 停止（fatal）
+  * 理由: 破損データまたは実装バグ。再試行で改善しない
+* Net/Timeout: 再試行（retry）
+  * backoff の対象（v2.4 と同じ上限 5秒）
+
+## v2.6 最小スキーマ（v2）
+
+v2 の最小スキーマは「追いつく」「復旧できる」「容量が測れる」に必要な最小に限定する。
+
+* meta(key PRIMARY KEY, value)
+  * cursor（CBOR）
+  * schema_version
+  * last_head
+  * last_ingest_at
+  * last_error（任意）
+* blocks(number PRIMARY KEY, hash?, timestamp, tx_count)
+* txs(tx_hash PRIMARY KEY, block_number, tx_index)
+* metrics_daily(day PRIMARY KEY, raw_bytes, compressed_bytes, sqlite_growth_bytes, blocks_ingested, errors)
+
+※ from/to/status/gas_used 等は v2.1 では必須にしない（必要になった時点で拡張する）。
+
+## v2.7 アーカイブ（任意だが推奨）
+
+* v2.1 は SQLite のみで開始してよい
+* ただし pruning 自動化をONにする前に、少なくともローカル zstd での raw アーカイブを導入することを推奨する
+* 目的: prune 後の調査・再構築・障害対応のための保険
+
+## v2.8 Pruning デーモンの安全弁（固定）
+
+pruning を外部ACKに依存させない設計とする代わりに、canister 側で 2段階の水位を持つ。
+
+* high_water: 通常 prune 開始
+* hard_emergency: 生存優先（retain を無視して古い方から削る）
+
+推奨値:
+
+* hard_emergency_ratio = 0.95（最初は 0.93 でも可）

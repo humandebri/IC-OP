@@ -316,6 +316,21 @@ caller_evm = last20bytes(keccak256("ic-evm:caller_evm:v1" || principal_bytes))
 
 * IcSynthetic は `caller_evm / canister_id / caller_principal` が必須
 * EthSigned は raw が EIP-2718、生caller/principalは空
+
+### 7) nonce 運用（IcSynthetic）
+
+**expected_nonce(sender)** を「次に受理されるnonce」と定義する。
+
+* 参照元は **sender_expected_nonce（stable）** を優先し、未初期化なら **EVM state nonce** で初期化
+* `submit_ic_tx` は **nonce == expected_nonce** のときのみ受理
+* `nonce < expected_nonce` → Reject（NonceTooLow）
+* `nonce > expected_nonce` → Reject（NonceGap）
+* 同一nonceの置換は **fee↑のみ許可**（それ以外は Reject: NonceConflict）
+
+**nonce 消費の区分**
+
+* ExecFailed（実行に入った失敗）→ **nonce消費**
+* Decode失敗など実行前不正 → **nonce非消費**
 * nonce運用/置換ルールは **EthSigned も同一**
 
 ### 7) IcSynthetic の nonce 運用（固定）

@@ -152,6 +152,7 @@ pub struct MetricsView {
     pub total_dropped: u64,
     pub cycles: u128,
     pub pruned_before_block: Option<u64>,
+    pub dev_faucet_enabled: bool,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -407,6 +408,10 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
 #[cfg(feature = "dev-faucet")]
 #[ic_cdk::update]
 fn dev_mint(address: Vec<u8>, amount: u128) {
+    let caller = ic_cdk::api::msg_caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        ic_cdk::trap("dev_mint: caller is not a controller");
+    }
     if address.len() != 20 {
         ic_cdk::trap("dev_mint: address must be 20 bytes");
     }
@@ -644,6 +649,7 @@ fn metrics(window: u64) -> MetricsView {
             total_dropped: metrics.total_dropped,
             cycles,
             pruned_before_block,
+            dev_faucet_enabled: cfg!(feature = "dev-faucet"),
         }
     })
 }

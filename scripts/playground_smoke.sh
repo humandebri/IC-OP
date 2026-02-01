@@ -21,6 +21,19 @@ log() {
   echo "[playground-smoke] $*"
 }
 
+dev_faucet_enabled() {
+  local metrics_json
+  metrics_json=$($DFX call "$CANISTER_ID" metrics "(0)" --output json)
+  python - <<'PY'
+import json, sys
+data = json.loads(sys.stdin.read())
+value = data.get("dev_faucet_enabled")
+if value is None:
+    sys.exit(2)
+print("true" if value else "false")
+PY
+}
+
 raw_tx_bytes_with_nonce() {
   local nonce_val="$1"
   local privkey="$2"
@@ -127,6 +140,14 @@ print(''.join(f'\\\\{b:02x}' for b in data))
 PY
 )
 if [[ "$USE_DEV_FAUCET" == "1" ]]; then
+  DEV_FAUCET_ENABLED="$(dev_faucet_enabled)" || {
+    echo "[playground-smoke] metrics does not expose dev_faucet_enabled. redeploy with updated canister."
+    exit 1
+  }
+  if [[ "$DEV_FAUCET_ENABLED" != "true" ]]; then
+    echo "[playground-smoke] dev_faucet is disabled on this canister. deploy with dev-faucet feature."
+    exit 1
+  fi
   log "dev_mint for ic caller"
   assert_command "$DFX call $CANISTER_ID dev_mint \"(blob \\\"$CALLER_BLOB\\\", $DEV_FAUCET_AMOUNT:nat)\""
 fi

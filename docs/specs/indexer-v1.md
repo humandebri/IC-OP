@@ -269,6 +269,31 @@ BlockBundle {
 length-prefix 形式は **export API では使わない**。  
 （将来のファイル保存形式などでのみ利用）
 
+### 7.5.1 payload エンコード仕様（v1 固定）
+
+**共通:**
+* `tx_id` は **32 bytes 固定**（ハッシュの生bytes）  
+* hex 文字列ではない  
+* `len` は **u32be**（item の bytes 長）  
+* `len = 0` は許容  
+* `payload_len` も **u32 の範囲**
+
+**block payload:**
+* `block_bytes` **単体**  
+* 形式: `bytes`（len prefix なし）
+
+**receipts payload:**
+* 同一ブロック内の receipts を列挙  
+* 形式: `repeat { tx_id(32) + u32be(len) + bytes }`
+
+**tx_index payload:**
+* 同一ブロック内の tx_index を列挙  
+* 形式: `repeat { tx_id(32) + u32be(len) + bytes }`
+
+**バージョニング:**
+* export API は **v1 固定**（フィールド追加なし）  
+* 破壊的変更は **新 API 名で切る**
+
 ### 7.6 cursor の詳細（Candid固定）
 
 **wire互換を優先**し、enum ではなく **数値タグ**を固定する。

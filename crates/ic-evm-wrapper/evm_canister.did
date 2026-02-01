@@ -44,6 +44,7 @@ type EthTxView = record {
   hash : blob;
   kind : TxKindView;
   block_number : opt nat64;
+  eth_tx_hash : opt blob;
   decoded : opt DecodedTxView;
 };
 type ExecResultDto = record {
@@ -58,6 +59,27 @@ type ExecuteTxError = variant {
   Internal : text;
   Rejected : text;
   InvalidArgument : text;
+};
+type ExportChunkView = record {
+  start : nat32;
+  segment : nat8;
+  payload_len : nat32;
+  bytes : blob;
+};
+type ExportCursorView = record {
+  byte_offset : nat32;
+  block_number : nat64;
+  segment : nat8;
+};
+type ExportErrorView = variant {
+  Limit;
+  InvalidCursor : record { message : text };
+  MissingData : record { message : text };
+  Pruned : record { pruned_before_block : nat64 };
+};
+type ExportResponseView = record {
+  next_cursor : opt ExportCursorView;
+  chunks : vec ExportChunkView;
 };
 type HealthView = record {
   is_producing : bool;
@@ -77,6 +99,7 @@ type LookupError = variant {
 type MetricsView = record {
   txs : nat64;
   ema_txs_per_block_x1000 : nat64;
+  pruned_before_block : opt nat64;
   ema_block_rate_per_sec_x1000 : nat64;
   total_submitted : nat64;
   window : nat64;
@@ -88,7 +111,7 @@ type MetricsView = record {
   drop_counts : vec DropCountView;
   queue_len : nat64;
   total_included : nat64;
-  pruned_before_block : opt nat64;
+  dev_faucet_enabled : bool;
 };
 type NoOpReason = variant { NoExecutableTx };
 type PendingStatusView = variant {
@@ -130,11 +153,13 @@ type ReceiptView = record {
   contract_address : opt blob;
 };
 type Result = variant { Ok : ExecResultDto; Err : ExecuteTxError };
-type Result_1 = variant { Ok : BlockView; Err : LookupError };
-type Result_2 = variant { Ok : ReceiptView; Err : LookupError };
-type Result_3 = variant { Ok : ProduceBlockStatus; Err : ProduceBlockError };
-type Result_4 = variant { Ok : PruneResultView; Err : ProduceBlockError };
-type Result_5 = variant { Ok : blob; Err : SubmitTxError };
+type Result_1 = variant { Ok : nat64; Err : text };
+type Result_2 = variant { Ok : ExportResponseView; Err : ExportErrorView };
+type Result_3 = variant { Ok : BlockView; Err : LookupError };
+type Result_4 = variant { Ok : ReceiptView; Err : LookupError };
+type Result_5 = variant { Ok : ProduceBlockStatus; Err : ProduceBlockError };
+type Result_6 = variant { Ok : PruneResultView; Err : ProduceBlockError };
+type Result_7 = variant { Ok : blob; Err : SubmitTxError };
 type SubmitTxError = variant {
   Internal : text;
   Rejected : text;
@@ -144,23 +169,25 @@ type TxKindView = variant { EthSigned; IcSynthetic };
 service : () -> {
   execute_eth_raw_tx : (blob) -> (Result);
   execute_ic_tx : (blob) -> (Result);
-  get_block : (nat64) -> (Result_1) query;
+  expected_nonce_by_address : (blob) -> (Result_1) query;
+  export_blocks : (opt ExportCursorView, nat32) -> (Result_2) query;
+  get_block : (nat64) -> (Result_3) query;
   get_cycle_balance : () -> (nat) query;
   get_pending : (blob) -> (PendingStatusView) query;
   get_queue_snapshot : (nat32, opt nat64) -> (QueueSnapshotView) query;
-  get_receipt : (blob) -> (Result_2) query;
+  get_receipt : (blob) -> (Result_4) query;
   health : () -> (HealthView) query;
   metrics : (nat64) -> (MetricsView) query;
-  produce_block : (nat32) -> (Result_3);
-  prune_blocks : (nat64, nat32) -> (Result_4);
+  produce_block : (nat32) -> (Result_5);
+  prune_blocks : (nat64, nat32) -> (Result_6);
   rpc_eth_block_number : () -> (nat64) query;
   rpc_eth_chain_id : () -> (nat64) query;
   rpc_eth_get_block_by_number : (nat64, bool) -> (opt EthBlockView) query;
   rpc_eth_get_transaction_by_hash : (blob) -> (opt EthTxView) query;
   rpc_eth_get_transaction_receipt : (blob) -> (opt EthReceiptView) query;
-  rpc_eth_send_raw_transaction : (blob) -> (Result_5);
+  rpc_eth_send_raw_transaction : (blob) -> (Result_7);
   set_auto_mine : (bool) -> ();
   set_mining_interval_ms : (nat64) -> ();
-  submit_eth_tx : (blob) -> (Result_5);
-  submit_ic_tx : (blob) -> (Result_5);
+  submit_eth_tx : (blob) -> (Result_7);
+  submit_ic_tx : (blob) -> (Result_7);
 }

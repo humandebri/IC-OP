@@ -184,12 +184,12 @@ canister は **エクスポートAPIを提供**するだけ。
 API 形（おすすめ）:
 
 * `get_head() -> u64`
-* `export_blocks(cursor, max_bytes) -> { items, next_cursor, approx_bytes }`
+* `export_blocks(cursor, max_bytes) -> { chunks, next_cursor }`
 
-cursor は **ブロック内の分割**を表現できる形（例: `(block_number, within_block_offset)`）にする。  
+cursor は **ブロック内の分割**を表現できる形にする。  
 1ブロックが 2MiB を超える可能性を潰すため **必須**。
 
-`BlockBundle` は **同じブロック単位**で返す（block本体 + receipts + tx_index など）。
+`chunks` は **同一ブロック単位**で返す（block/receipts/tx_index を分割）。
 
 サイズ上限（安全側）:
 * Ingress payload 最大 **2MiB**

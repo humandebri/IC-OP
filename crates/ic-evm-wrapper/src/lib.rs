@@ -455,10 +455,10 @@ fn produce_block(max_txs: u32) -> Result<ProduceBlockStatus, ProduceBlockError> 
     let limit = usize::try_from(max_txs).unwrap_or(0);
     match chain::produce_block(limit) {
         Ok(block) => {
-            let gas_used = with_state(|state| {
+            let gas_used = with_state(|_state| {
                 let mut total = 0u64;
                 for tx_id in block.tx_ids.iter() {
-                    if let Some(receipt) = state.receipts.get(tx_id) {
+                    if let Some(receipt) = chain::get_receipt(tx_id) {
                         total = total.saturating_add(receipt.gas_used);
                     }
                 }
@@ -1049,6 +1049,11 @@ fn get_queue_snapshot(limit: u32, cursor: Option<u64>) -> QueueSnapshotView {
     }
 }
 ic_cdk::export_candid!();
+
+// NOTE: used by build-time tooling to snapshot candid for wire-compat checks.
+pub fn export_did() -> String {
+    __export_service()
+}
 
 #[cfg(test)]
 mod tests {

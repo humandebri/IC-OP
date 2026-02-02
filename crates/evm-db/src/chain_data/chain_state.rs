@@ -4,6 +4,7 @@ use crate::chain_data::constants::{
     CHAIN_ID, CHAIN_STATE_SIZE_U32, DEFAULT_BASE_FEE, DEFAULT_MINING_INTERVAL_MS,
     DEFAULT_MIN_GAS_PRICE, DEFAULT_MIN_PRIORITY_FEE,
 };
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -86,6 +87,7 @@ impl Storable for ChainStateV1 {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 72 {
+            record_corrupt(b"chain_state");
             return ChainStateV1::new(CHAIN_ID);
         }
         let mut schema = [0u8; 4];

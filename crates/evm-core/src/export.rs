@@ -6,6 +6,7 @@ use ic_stable_structures::Storable;
 use std::borrow::Cow;
 
 const MAX_EXPORT_BYTES: u32 = 1_500_000;
+const MAX_EXPORT_BLOCKS: u32 = 64;
 const MAX_SEGMENT_LEN: u32 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,94 +80,120 @@ pub fn export_blocks(
             });
         }
 
-        let block_ptr = state
-            .blocks
-            .get(&cursor.block_number)
-            .ok_or(ExportError::MissingData("block missing"))?;
-        let block_bytes = state
-            .blob_store
-            .read(&block_ptr)
-            .map_err(|_| ExportError::MissingData("block bytes missing"))?;
-        let block = BlockData::from_bytes(Cow::Owned(block_bytes.clone()));
-
-        let receipts_payload = build_receipts_payload(state, &block.tx_ids)?;
-        let tx_index_payload = build_tx_index_payload(state, &block.tx_ids)?;
-
-        let block_payload = block_bytes;
-        let payloads = [block_payload, receipts_payload, tx_index_payload];
-        let payload_lens = [
-            u32::try_from(payloads[0].len()).map_err(|_| ExportError::InvalidCursor("block too large"))?,
-            u32::try_from(payloads[1].len()).map_err(|_| ExportError::InvalidCursor("receipts too large"))?,
-            u32::try_from(payloads[2].len()).map_err(|_| ExportError::InvalidCursor("tx_index too large"))?,
-        ];
-        for len in payload_lens.iter() {
-            if *len > MAX_SEGMENT_LEN {
-                return Err(ExportError::InvalidCursor("segment too large"));
-            }
-        }
-        let seg_index = usize::try_from(cursor.segment)
-            .map_err(|_| ExportError::InvalidCursor("segment"))?;
-        if cursor.byte_offset > payload_lens[seg_index] {
-            return Err(ExportError::InvalidCursor("byte_offset out of range"));
-        }
-
         let mut chunks = Vec::new();
         let mut remaining = max_bytes;
         let mut seg = cursor.segment;
         let mut offset = cursor.byte_offset;
+        let mut block_number = cursor.block_number;
+        let mut blocks_emitted = 0u32;
 
-        let mut is_first = true;
-        while remaining > 0 && seg <= 2 {
-            let seg_index = usize::try_from(seg).map_err(|_| ExportError::InvalidCursor("segment"))?;
-            let payload = &payloads[seg_index];
-            let payload_len = payload_lens[seg_index];
-            if offset > payload_len {
-                return Err(ExportError::InvalidCursor("offset out of range"));
+        while remaining > 0 && blocks_emitted < MAX_EXPORT_BLOCKS {
+            if block_number > head {
+                break;
             }
-            if offset == payload_len {
-                if is_first {
-                    chunks.push(ExportChunk {
-                        segment: seg,
-                        start: offset,
-                        bytes: Vec::new(),
-                        payload_len,
+            if let Some(pruned) = pruned_before {
+                if block_number <= pruned {
+                    return Err(ExportError::Pruned {
+                        pruned_before_block: pruned,
                     });
-                    is_first = false;
                 }
-                if seg == 2 {
-                    break;
-                }
-                seg = seg.saturating_add(1);
-                offset = 0;
-                continue;
             }
-            let available = payload_len.saturating_sub(offset);
-            let take = if available > remaining { remaining } else { available };
-            let start = usize::try_from(offset).map_err(|_| ExportError::InvalidCursor("offset"))?;
-            let end = start
-                .checked_add(usize::try_from(take).map_err(|_| ExportError::InvalidCursor("length"))?)
-                .ok_or(ExportError::InvalidCursor("slice overflow"))?;
-            let bytes = payload[start..end].to_vec();
-            chunks.push(ExportChunk {
-                segment: seg,
-                start: offset,
-                bytes,
-                payload_len,
-            });
-            is_first = false;
-            remaining = remaining.saturating_sub(take);
-            offset = offset.saturating_add(take);
-            if offset == payload_len {
-                if seg == 2 {
-                    break;
-                }
-                seg = seg.saturating_add(1);
-                offset = 0;
+
+            if seg > 2 {
+                return Err(ExportError::InvalidCursor("segment out of range"));
             }
+            let (payloads, payload_lens) = build_block_payloads(state, block_number)?;
+            let seg_index = seg as usize;
+            debug_assert!(seg_index < 3);
+            if offset > payload_lens[seg_index] {
+                return Err(ExportError::InvalidCursor("byte_offset out of range"));
+            }
+
+            let mut is_first = true;
+            let mut block_started = false;
+            while remaining > 0 && seg <= 2 {
+                let seg_index = seg as usize;
+                debug_assert!(seg_index < 3);
+                let payload = &payloads[seg_index];
+                let payload_len = payload_lens[seg_index];
+                if offset > payload_len {
+                    return Err(ExportError::InvalidCursor("offset out of range"));
+                }
+                if offset == payload_len {
+                    if is_first {
+                        chunks.push(ExportChunk {
+                            segment: seg,
+                            start: offset,
+                            bytes: Vec::new(),
+                            payload_len,
+                        });
+                        is_first = false;
+                        block_started = true;
+                    }
+                    if seg == 2 {
+                        break;
+                    }
+                    seg = seg.saturating_add(1);
+                    offset = 0;
+                    continue;
+                }
+                let available = payload_len.saturating_sub(offset);
+                let take = if available > remaining { remaining } else { available };
+                let start =
+                    usize::try_from(offset).map_err(|_| ExportError::InvalidCursor("offset"))?;
+                let end = start
+                    .checked_add(
+                        usize::try_from(take).map_err(|_| ExportError::InvalidCursor("length"))?,
+                    )
+                    .ok_or(ExportError::InvalidCursor("slice overflow"))?;
+                let bytes = payload[start..end].to_vec();
+                chunks.push(ExportChunk {
+                    segment: seg,
+                    start: offset,
+                    bytes,
+                    payload_len,
+                });
+                is_first = false;
+                block_started = true;
+                remaining = remaining.saturating_sub(take);
+                offset = offset.saturating_add(take);
+                if offset == payload_len {
+                    if seg == 2 {
+                        break;
+                    }
+                    seg = seg.saturating_add(1);
+                    offset = 0;
+                }
+            }
+
+            if block_started {
+                blocks_emitted = blocks_emitted.saturating_add(1);
+            }
+
+            let block_done = seg == 2 && offset == payload_lens[2];
+            if remaining == 0 || !block_done {
+                break;
+            }
+
+            if blocks_emitted >= MAX_EXPORT_BLOCKS {
+                block_number = block_number.saturating_add(1);
+                seg = 0;
+                offset = 0;
+                break;
+            }
+
+            block_number = block_number.saturating_add(1);
+            seg = 0;
+            offset = 0;
+        }
+
+        let emitted_bytes: usize = chunks.iter().map(|c| c.bytes.len()).sum();
+        if emitted_bytes == 0 {
+            return Err(ExportError::Limit);
         }
 
         let next_cursor = ExportCursor {
-            block_number: cursor.block_number,
+            block_number,
             segment: seg,
             byte_offset: offset,
         };
@@ -176,6 +203,38 @@ pub fn export_blocks(
             next_cursor: Some(next_cursor),
         })
     })
+}
+
+fn build_block_payloads(
+    state: &evm_db::stable_state::StableState,
+    block_number: u64,
+) -> Result<([Vec<u8>; 3], [u32; 3]), ExportError> {
+    let block_ptr = state
+        .blocks
+        .get(&block_number)
+        .ok_or(ExportError::MissingData("block missing"))?;
+    let block_bytes = state
+        .blob_store
+        .read(&block_ptr)
+        .map_err(|_| ExportError::MissingData("block bytes missing"))?;
+    let block = BlockData::from_bytes(Cow::Borrowed(&block_bytes));
+
+    let receipts_payload = build_receipts_payload(state, &block.tx_ids)?;
+    let tx_index_payload = build_tx_index_payload(state, &block.tx_ids)?;
+
+    let block_payload = block_bytes;
+    let payloads = [block_payload, receipts_payload, tx_index_payload];
+    let payload_lens = [
+        u32::try_from(payloads[0].len()).map_err(|_| ExportError::InvalidCursor("block too large"))?,
+        u32::try_from(payloads[1].len()).map_err(|_| ExportError::InvalidCursor("receipts too large"))?,
+        u32::try_from(payloads[2].len()).map_err(|_| ExportError::InvalidCursor("tx_index too large"))?,
+    ];
+    for len in payload_lens.iter() {
+        if *len > MAX_SEGMENT_LEN {
+            return Err(ExportError::InvalidCursor("segment too large"));
+        }
+    }
+    Ok((payloads, payload_lens))
 }
 
 fn build_receipts_payload(

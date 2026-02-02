@@ -1,13 +1,13 @@
 //! どこで: Phase1.3の手数料順序 / 何を: ready_queue用キーとpendingキー / なぜ: 決定的な優先順とnonce待ちを両立するため
 
 use crate::decode::hash_to_array;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 
 pub const READY_KEY_LEN: usize = 72;
 pub const READY_KEY_LEN_U32: u32 = 72;
-const READY_KEY_LEN_V1: usize = 56;
 pub const SENDER_KEY_LEN: usize = 20;
 pub const SENDER_KEY_LEN_U32: u32 = 20;
 pub const SENDER_NONCE_KEY_LEN: usize = 28;
@@ -57,22 +57,10 @@ impl Storable for ReadyKey {
                 buf.copy_from_slice(data);
                 Self(buf)
             }
-            READY_KEY_LEN_V1 => {
-                let mut max_fee_inv = [0u8; 16];
-                max_fee_inv.copy_from_slice(&data[0..16]);
-                let mut seq = [0u8; 8];
-                seq.copy_from_slice(&data[16..24]);
-                let mut tx_hash = [0u8; 32];
-                tx_hash.copy_from_slice(&data[24..56]);
-                let max_priority_inv = u128::MAX.to_be_bytes();
-                let mut buf = [0u8; READY_KEY_LEN];
-                buf[0..16].copy_from_slice(&max_fee_inv);
-                buf[16..32].copy_from_slice(&max_priority_inv);
-                buf[32..40].copy_from_slice(&seq);
-                buf[40..72].copy_from_slice(&tx_hash);
-                Self(buf)
+            _ => {
+                record_corrupt(b"ready_key");
+                ReadyKey(hash_to_array(b"ready_key", data))
             }
-            _ => ReadyKey(hash_to_array(b"ready_key", data)),
         }
     }
 
@@ -103,6 +91,7 @@ impl Storable for SenderKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != SENDER_KEY_LEN {
+            record_corrupt(b"sender_key");
             return SenderKey(hash_to_array(b"sender_key", data));
         }
         let mut buf = [0u8; SENDER_KEY_LEN];
@@ -149,6 +138,7 @@ impl Storable for SenderNonceKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != SENDER_NONCE_KEY_LEN {
+            record_corrupt(b"sender_nonce_key");
             let hashed = hash_to_array::<SENDER_NONCE_KEY_LEN>(b"sender_nonce_key", data);
             let mut sender = [0u8; 20];
             sender.copy_from_slice(&hashed[0..20]);

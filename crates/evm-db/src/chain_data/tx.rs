@@ -4,6 +4,7 @@ use crate::chain_data::constants::{
     MAX_PRINCIPAL_LEN, MAX_TX_SIZE, TX_ID_LEN, TX_ID_LEN_U32, MAX_TX_SIZE_U32,
 };
 use crate::decode::hash_to_array;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -26,6 +27,7 @@ impl Storable for TxId {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != TX_ID_LEN {
+            record_corrupt(b"tx_id");
             return TxId(hash_to_array(b"tx_id", data));
         }
         let mut buf = [0u8; TX_ID_LEN];
@@ -513,6 +515,7 @@ impl Storable for TxIndexEntry {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 12 {
+            record_corrupt(b"tx_index");
             return TxIndexEntry {
                 block_number: 0,
                 tx_index: 0,

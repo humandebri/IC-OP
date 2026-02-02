@@ -1,6 +1,7 @@
 //! どこで: META領域 / 何を: magic/version/schema_hashの検証 / なぜ: 壊れた起動を防ぐため
 
 use crate::memory::{get_memory, AppMemoryId, VMem};
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{StableCell, Storable};
 use std::borrow::Cow;
@@ -60,6 +61,7 @@ impl Storable for Meta {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 40 {
+            record_corrupt(b"meta");
             return Meta::new();
         }
         let mut magic = [0u8; 4];

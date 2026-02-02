@@ -3,6 +3,7 @@
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use crate::corrupt_log::record_corrupt;
 
 pub const METRICS_BUCKETS: usize = 256;
 pub const METRICS_BUCKETS_U32: u32 = 256;
@@ -213,6 +214,7 @@ impl Storable for MetricsStateV1 {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != METRICS_STATE_SIZE as usize {
+            record_corrupt(b"metrics_state");
             return MetricsStateV1::new();
         }
         let mut offset = 0usize;

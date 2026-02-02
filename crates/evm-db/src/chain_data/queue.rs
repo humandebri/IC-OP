@@ -3,6 +3,7 @@
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use crate::corrupt_log::record_corrupt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueueMeta {
@@ -60,6 +61,7 @@ impl Storable for QueueMeta {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 16 {
+            record_corrupt(b"queue_meta");
             return QueueMeta::new();
         }
         let mut head = [0u8; 8];

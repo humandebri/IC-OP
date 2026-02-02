@@ -96,6 +96,93 @@ fn export_pruned_and_oldest_exportable() {
     assert_eq!(next.block_number, 6);
 }
 
+#[test]
+fn export_advances_across_blocks_when_budget_allows() {
+    init_stable_state();
+    let tx1 = TxId([0x44; 32]);
+    let tx2 = TxId([0x55; 32]);
+    let block1 = make_block(1, tx1);
+    let block2 = make_block(2, tx2);
+    with_state_mut(|state| {
+        insert_block(state, 1, &block1);
+        insert_receipt(state, tx1, 1);
+        insert_tx_index(state, tx1, 1);
+        state.tx_locs.insert(tx1, TxLoc::included(1, 0));
+
+        insert_block(state, 2, &block2);
+        insert_receipt(state, tx2, 2);
+        insert_tx_index(state, tx2, 2);
+        state.tx_locs.insert(tx2, TxLoc::included(2, 0));
+
+        let mut head = *state.head.get();
+        head.number = 2;
+        state.head.set(head);
+    });
+
+    let cursor = ExportCursor {
+        block_number: 1,
+        segment: 0,
+        byte_offset: 0,
+    };
+    let result = export_blocks(Some(cursor), 1_000_000).expect("export should succeed");
+    assert!(!result.chunks.is_empty());
+    let next = result.next_cursor.expect("next cursor");
+    assert_eq!(next.block_number, 3);
+}
+
+#[test]
+fn export_rejects_segment_out_of_range() {
+    init_stable_state();
+    let tx = TxId([0x66; 32]);
+    let block = make_block(1, tx);
+    with_state_mut(|state| {
+        insert_block(state, 1, &block);
+        insert_receipt(state, tx, 1);
+        insert_tx_index(state, tx, 1);
+        state.tx_locs.insert(tx, TxLoc::included(1, 0));
+        let mut head = *state.head.get();
+        head.number = 1;
+        state.head.set(head);
+    });
+
+    let cursor = ExportCursor {
+        block_number: 1,
+        segment: 3,
+        byte_offset: 0,
+    };
+    let err = export_blocks(Some(cursor), 10).expect_err("should be invalid cursor");
+    assert!(matches!(err, ExportError::InvalidCursor(_)));
+}
+
+#[test]
+fn export_advances_on_segment_boundary() {
+    init_stable_state();
+    let tx = TxId([0x77; 32]);
+    let block = make_block(1, tx);
+    with_state_mut(|state| {
+        insert_block(state, 1, &block);
+        insert_receipt(state, tx, 1);
+        insert_tx_index(state, tx, 1);
+        state.tx_locs.insert(tx, TxLoc::included(1, 0));
+        let mut head = *state.head.get();
+        head.number = 1;
+        state.head.set(head);
+    });
+
+    let block_bytes = block.to_bytes().into_owned();
+    let cursor = ExportCursor {
+        block_number: 1,
+        segment: 0,
+        byte_offset: u32::try_from(block_bytes.len()).unwrap_or(0),
+    };
+    let result = export_blocks(Some(cursor), 1).expect("export should succeed");
+    assert!(!result.chunks.is_empty());
+    let next = result.next_cursor.expect("next cursor");
+    assert_eq!(next.block_number, 1);
+    assert_eq!(next.segment, 1);
+    assert_eq!(next.byte_offset, 1);
+}
+
 fn make_block(number: u64, tx_id: TxId) -> BlockData {
     let parent_hash = [0u8; 32];
     let number_u8 = u8::try_from(number).unwrap_or(0);

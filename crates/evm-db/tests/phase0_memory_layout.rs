@@ -10,4 +10,5 @@ fn memory_id_layout_is_frozen() {
     assert_eq!(AppMemoryId::Storage.as_u8(), 3);
     assert_eq!(AppMemoryId::Codes.as_u8(), 4);
     assert_eq!(AppMemoryId::StateAux.as_u8(), 5);
+    assert_eq!(AppMemoryId::CorruptLog.as_u8(), 34);
 }

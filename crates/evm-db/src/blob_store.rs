@@ -3,6 +3,7 @@
 use crate::blob_ptr::BlobPtr;
 use crate::size_class::{smallest_class, SizeClassError};
 use crate::memory::VMem;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{Memory, StableBTreeMap, StableCell, Storable};
 use std::borrow::Cow;
@@ -59,6 +60,7 @@ impl Storable for AllocKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 12 {
+            record_corrupt(b"alloc_key");
             return Self { class: 0, offset: 0 };
         }
         let mut class = [0u8; 4];
@@ -101,6 +103,7 @@ impl Storable for AllocEntry {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 8 {
+            record_corrupt(b"alloc_entry");
             return Self {
                 gen: 0,
                 state: BlobState::Free,
@@ -108,7 +111,13 @@ impl Storable for AllocEntry {
         }
         let mut gen = [0u8; 4];
         gen.copy_from_slice(&data[0..4]);
-        let state = BlobState::from_u8(data[4]).unwrap_or(BlobState::Free);
+        let state = match BlobState::from_u8(data[4]) {
+            Some(value) => value,
+            None => {
+                record_corrupt(b"alloc_entry_state");
+                BlobState::Free
+            }
+        };
         Self {
             gen: u32::from_be_bytes(gen),
             state,

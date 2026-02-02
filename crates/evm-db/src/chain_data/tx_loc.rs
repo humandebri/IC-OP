@@ -1,6 +1,7 @@
 //! どこで: chain_data のTx位置 / 何を: Pending/Included/Dropped の最小表現 / なぜ: pending可視化を安定化するため
 
 use crate::chain_data::constants::TX_LOC_SIZE_U32;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -72,13 +73,17 @@ impl Storable for TxLoc {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 24 {
+            record_corrupt(b"tx_loc");
             return TxLoc::queued(0);
         }
         let kind = match data[0] {
             0 => TxLocKind::Queued,
             1 => TxLocKind::Included,
             2 => TxLocKind::Dropped,
-            _ => TxLocKind::Queued,
+            _ => {
+                record_corrupt(b"tx_loc_kind");
+                TxLocKind::Queued
+            }
         };
         let mut seq = [0u8; 8];
         seq.copy_from_slice(&data[1..9]);

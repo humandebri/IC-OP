@@ -3,6 +3,7 @@
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use crate::corrupt_log::record_corrupt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobPtr {
@@ -34,6 +35,7 @@ impl Storable for BlobPtr {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 20 {
+            record_corrupt(b"blob_ptr");
             return Self {
                 offset: 0,
                 len: 0,

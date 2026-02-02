@@ -2,6 +2,7 @@
 
 use crate::chain_data::constants::{CALLER_KEY_LEN, MAX_PRINCIPAL_LEN};
 use crate::decode::hash_to_array;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -34,6 +35,7 @@ impl Storable for CallerKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != CALLER_KEY_LEN {
+            record_corrupt(b"caller_key");
             return CallerKey(hash_to_array(b"caller_key", data));
         }
         let mut out = [0u8; CALLER_KEY_LEN];

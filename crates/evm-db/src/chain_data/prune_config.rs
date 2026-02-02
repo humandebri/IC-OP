@@ -3,6 +3,7 @@
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use crate::corrupt_log::record_corrupt;
 
 const PRUNE_CONFIG_SIZE_U32: u32 = 112;
 const NONE_U64: u64 = u64::MAX;
@@ -151,6 +152,7 @@ impl Storable for PruneConfigV1 {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != PRUNE_CONFIG_SIZE_U32 as usize {
+            record_corrupt(b"prune_config");
             return PruneConfigV1::new();
         }
         let mut schema = [0u8; 4];

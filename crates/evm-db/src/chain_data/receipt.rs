@@ -5,6 +5,7 @@ use crate::chain_data::constants::{
     RECEIPT_CONTRACT_ADDR_LEN, RECEIPT_MAX_SIZE_U32,
 };
 use crate::chain_data::tx::TxId;
+use crate::corrupt_log::record_corrupt;
 use crate::decode::{read_array, read_u32, read_u64, read_u8, read_vec};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
@@ -93,111 +94,111 @@ impl Storable for ReceiptLike {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() > RECEIPT_MAX_SIZE_U32 as usize {
-            return empty_receipt();
+            return corrupt_receipt();
         }
         let mut offset = 0usize;
         let tx_id = match read_array::<32>(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let block_number = match read_u64(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let tx_index = match read_u32(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let status = match read_u8(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let gas_used = match read_u64(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let effective_gas_price = match read_u64(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let return_data_hash = match read_array::<32>(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let return_len = match read_u32(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let return_len_usize = match usize::try_from(return_len) {
             Ok(value) => value,
-            Err(_) => return empty_receipt(),
+            Err(_) => return corrupt_receipt(),
         };
         if return_len_usize > MAX_RETURN_DATA {
-            return empty_receipt();
+            return corrupt_receipt();
         }
         let return_data = match read_vec(data, &mut offset, return_len_usize) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let has_addr = match read_u8(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let addr = match read_array::<RECEIPT_CONTRACT_ADDR_LEN>(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let contract_address = if has_addr == 1 { Some(addr) } else { None };
         let logs_len = match read_u32(data, &mut offset) {
             Some(value) => value,
-            None => return empty_receipt(),
+            None => return corrupt_receipt(),
         };
         let logs_len_usize = match usize::try_from(logs_len) {
             Ok(value) => value,
-            Err(_) => return empty_receipt(),
+            Err(_) => return corrupt_receipt(),
         };
         if logs_len_usize > MAX_LOGS_PER_TX {
-            return empty_receipt();
+            return corrupt_receipt();
         }
         let mut logs = Vec::with_capacity(logs_len_usize);
         for _ in 0..logs_len_usize {
             let address = match read_array::<20>(data, &mut offset) {
                 Some(value) => value,
-                None => return empty_receipt(),
+                None => return corrupt_receipt(),
             };
             let topics_len = match read_u32(data, &mut offset) {
                 Some(value) => value,
-                None => return empty_receipt(),
+                None => return corrupt_receipt(),
             };
             let topics_len_usize = match usize::try_from(topics_len) {
                 Ok(value) => value,
-                Err(_) => return empty_receipt(),
+                Err(_) => return corrupt_receipt(),
             };
             if topics_len_usize > MAX_LOG_TOPICS {
-                return empty_receipt();
+                return corrupt_receipt();
             }
             let mut topics = Vec::with_capacity(topics_len_usize);
             for _ in 0..topics_len_usize {
                 let topic = match read_array::<32>(data, &mut offset) {
                     Some(value) => value,
-                    None => return empty_receipt(),
+                    None => return corrupt_receipt(),
                 };
                 topics.push(topic);
             }
             let data_len = match read_u32(data, &mut offset) {
                 Some(value) => value,
-                None => return empty_receipt(),
+                None => return corrupt_receipt(),
             };
             let data_len_usize = match usize::try_from(data_len) {
                 Ok(value) => value,
-                Err(_) => return empty_receipt(),
+                Err(_) => return corrupt_receipt(),
             };
             if data_len_usize > MAX_LOG_DATA {
-                return empty_receipt();
+                return corrupt_receipt();
             }
             let data = match read_vec(data, &mut offset, data_len_usize) {
                 Some(value) => value,
-                None => return empty_receipt(),
+                None => return corrupt_receipt(),
             };
             logs.push(LogEntry {
                 address,
@@ -225,7 +226,8 @@ impl Storable for ReceiptLike {
     };
 }
 
-fn empty_receipt() -> ReceiptLike {
+fn corrupt_receipt() -> ReceiptLike {
+    record_corrupt(b"receipt");
     ReceiptLike {
         tx_id: TxId([0u8; 32]),
         block_number: 0,

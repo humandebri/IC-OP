@@ -1,6 +1,7 @@
 //! どこで: Stable構造体のStorable実装 / 何を: 固定長/可変長の境界指定 / なぜ: 安全なシリアライズのため
 
 use crate::decode::hash_to_array;
+use crate::corrupt_log::record_corrupt;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
 use crate::types::values::{
     AccountVal, CodeVal, U256Val, ACCOUNT_VAL_LEN, ACCOUNT_VAL_LEN_U32, MAX_CODE_SIZE_U32, U256_LEN,
@@ -22,6 +23,7 @@ impl Storable for AccountKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 21 {
+            record_corrupt(b"account_key");
             return AccountKey(hash_to_array(b"account_key", data));
         }
         let mut buf = [0u8; 21];
@@ -47,6 +49,7 @@ impl Storable for StorageKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 53 {
+            record_corrupt(b"storage_key");
             return StorageKey(hash_to_array(b"storage_key", data));
         }
         let mut buf = [0u8; 53];
@@ -72,6 +75,7 @@ impl Storable for CodeKey {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != 33 {
+            record_corrupt(b"code_key");
             return CodeKey(hash_to_array(b"code_key", data));
         }
         let mut buf = [0u8; 33];
@@ -97,6 +101,7 @@ impl Storable for AccountVal {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != ACCOUNT_VAL_LEN {
+            record_corrupt(b"account_val");
             return AccountVal([0u8; ACCOUNT_VAL_LEN]);
         }
         let mut buf = [0u8; ACCOUNT_VAL_LEN];
@@ -122,6 +127,7 @@ impl Storable for U256Val {
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
         if data.len() != U256_LEN {
+            record_corrupt(b"u256_val");
             return U256Val([0u8; U256_LEN]);
         }
         let mut buf = [0u8; U256_LEN];

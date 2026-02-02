@@ -3,11 +3,19 @@
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { idlFactory } from "./candid";
 import { Config } from "./config";
-import { Cursor, ExportActorMethods, ExportError, ExportResponse, Result } from "./types";
+import {
+  Cursor,
+  ExportActorMethods,
+  ExportError,
+  ExportResponse,
+  PruneStatusView,
+  Result,
+} from "./types";
 
 export type ExportClient = {
   exportBlocks: (cursor: Cursor | null, maxBytes: number) => Promise<Result<ExportResponse, ExportError>>;
   getHeadNumber: () => Promise<bigint>;
+  getPruneStatus: () => Promise<PruneStatusView>;
 };
 
 export async function createClient(config: Config): Promise<ExportClient> {
@@ -31,5 +39,6 @@ export async function createClient(config: Config): Promise<ExportClient> {
       return actor.export_blocks(arg, maxBytes);
     },
     getHeadNumber: async () => actor.rpc_eth_block_number(),
+    getPruneStatus: async () => actor.get_prune_status(),
   };
 }

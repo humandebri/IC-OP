@@ -27,6 +27,7 @@ export class IndexerDb {
   private upsertMetricsStmt: Database.Statement;
   private upsertArchiveStmt: Database.Statement;
   private listArchiveStmt: Database.Statement;
+  private sumArchiveStmt: Database.Statement;
 
   constructor(path: string) {
     this.db = new Database(path);
@@ -44,11 +45,11 @@ export class IndexerDb {
       "INSERT INTO txs(tx_hash, block_number, tx_index) VALUES(?, ?, ?) ON CONFLICT(tx_hash) DO UPDATE SET block_number = excluded.block_number, tx_index = excluded.tx_index"
     );
     this.upsertMetricsStmt = this.db.prepare(
-      "INSERT INTO metrics_daily(day, raw_bytes, compressed_bytes, sqlite_growth_bytes, archive_bytes, blocks_ingested, errors) VALUES(?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO metrics_daily(day, raw_bytes, compressed_bytes, sqlite_bytes, archive_bytes, blocks_ingested, errors) VALUES(?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(day) DO UPDATE SET " +
         "raw_bytes = raw_bytes + excluded.raw_bytes, " +
         "compressed_bytes = compressed_bytes + excluded.compressed_bytes, " +
-        "sqlite_growth_bytes = COALESCE(excluded.sqlite_growth_bytes, sqlite_growth_bytes), " +
+        "sqlite_bytes = COALESCE(excluded.sqlite_bytes, sqlite_bytes), " +
         "archive_bytes = COALESCE(excluded.archive_bytes, archive_bytes), " +
         "blocks_ingested = blocks_ingested + excluded.blocks_ingested, " +
         "errors = errors + excluded.errors"
@@ -63,6 +64,7 @@ export class IndexerDb {
         "created_at = excluded.created_at"
     );
     this.listArchiveStmt = this.db.prepare<{ path: string }>("select path from archive_parts");
+    this.sumArchiveStmt = this.db.prepare("select coalesce(sum(size_bytes), 0) as total from archive_parts");
   }
 
   close(): void {
@@ -146,6 +148,14 @@ export class IndexerDb {
       }
     }
     return out;
+  }
+
+  getArchiveBytesSum(): number {
+    const row = this.sumArchiveStmt.get() as { total: number } | undefined;
+    if (!row || typeof row.total !== "number") {
+      return 0;
+    }
+    return row.total;
   }
 }
 

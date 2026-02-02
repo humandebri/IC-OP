@@ -26,7 +26,22 @@ export type ExportError =
 
 export type Result<T, E> = { Ok: T } | { Err: E };
 
+export type PruneStatusView = {
+  pruning_enabled: boolean;
+  prune_running: boolean;
+  estimated_kept_bytes: bigint;
+  high_water_bytes: bigint;
+  low_water_bytes: bigint;
+  hard_emergency_bytes: bigint;
+  last_prune_at: bigint;
+  pruned_before_block: bigint | null;
+  oldest_kept_block: bigint | null;
+  oldest_kept_timestamp: bigint | null;
+  need_prune: boolean;
+};
+
 export type ExportActorMethods = {
   export_blocks: (cursor: [] | [Cursor], max_bytes: number) => Promise<Result<ExportResponse, ExportError>>;
   rpc_eth_block_number: () => Promise<bigint>;
+  get_prune_status: () => Promise<PruneStatusView>;
 };

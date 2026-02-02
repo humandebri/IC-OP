@@ -22,6 +22,7 @@ npm run dev
 - `INDEXER_BACKOFF_INITIAL_MS` (任意, 既定: 200)
 - `INDEXER_BACKOFF_MAX_MS` (任意, 既定: 5000)
 - `INDEXER_IDLE_POLL_MS` (任意, 既定: 1000)
+- `INDEXER_PRUNE_STATUS_POLL_MS` (任意, 既定: 30000)
 - `INDEXER_FETCH_ROOT_KEY` (任意, 1/true で有効。local向け)
 - `INDEXER_ARCHIVE_DIR` (任意, 既定: ./archive)
 - `INDEXER_CHAIN_ID` (任意, 既定: unknown)
@@ -56,7 +57,7 @@ npm run dev
 
 ## metrics_daily
 
-`sqlite_growth_bytes` は v0 では未更新（将来、DBサイズ差分で計測する）。
+`sqlite_bytes` は日次の実サイズ（差分は集計側で算出）。
 
 ## マイグレーション（SQLite）
 

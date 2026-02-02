@@ -89,7 +89,7 @@ pub fn set_pruning_enabled(enabled: bool) -> Result<(), ChainError> {
 pub fn get_prune_status() -> PruneStatus {
     with_state(|state| {
         let config = *state.prune_config.get();
-        let need_prune = should_prune_internal(state);
+        let need_prune = need_prune_internal(state);
         PruneStatus {
             pruning_enabled: config.pruning_enabled,
             prune_running: config.prune_running,
@@ -119,7 +119,7 @@ pub fn prune_tick() -> Result<PruneResult, ChainError> {
             return false;
         }
         state.prune_config.set(config);
-        if !should_prune_internal(state) {
+        if !need_prune_internal(state) {
             return false;
         }
         let mut config = *state.prune_config.get();
@@ -150,7 +150,7 @@ pub fn prune_tick() -> Result<PruneResult, ChainError> {
     result
 }
 
-fn should_prune_internal(state: &StableState) -> bool {
+fn need_prune_internal(state: &StableState) -> bool {
     let config = *state.prune_config.get();
     let now = state.head.get().timestamp;
     let time_trigger = if config.retain_days > 0 {
@@ -173,16 +173,18 @@ fn compute_retain_count(state: &StableState, policy: PrunePolicy) -> u64 {
     let config = state.prune_config.get();
     let emergency = policy.target_bytes > 0
         && config.estimated_kept_bytes > config.hard_emergency_bytes;
-    if emergency {
-        return 1;
-    }
-    if policy.target_bytes > 0 && config.estimated_kept_bytes > config.high_water_bytes {
+    let cap_trigger = policy.target_bytes > 0
+        && config.estimated_kept_bytes > config.high_water_bytes;
+    if emergency || cap_trigger {
         // 容量トリガ発動時は retain を無視して古い方から削る
         return 1;
     }
-    let mut retain_min_block = head;
+    let mut retain_min_block = 0u64;
     if policy.retain_blocks > 0 {
-        retain_min_block = head.saturating_sub(policy.retain_blocks).saturating_add(1);
+        let oldest = head.saturating_sub(policy.retain_blocks.saturating_sub(1));
+        if oldest > retain_min_block {
+            retain_min_block = oldest;
+        }
     }
     if policy.retain_days > 0 {
         let retain_secs = policy.retain_days.saturating_mul(86_400);

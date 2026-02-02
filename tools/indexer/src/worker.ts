@@ -2,14 +2,13 @@
 // どこで: indexer本体 / 何を: pull→検証→DBコミット / なぜ: 仕様のコミット境界を守るため
 
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { Config, sleep } from "./config";
 import { createClient } from "./client";
 import { IndexerDb } from "./db";
 import { archiveBlock } from "./archiver";
 import { runArchiveGc } from "./archive_gc";
 import { decodeBlockPayload, decodeTxIndexPayload } from "./decode";
-import { Chunk, Cursor, ExportError, ExportResponse, Result } from "./types";
+import { Chunk, Cursor, ExportError, ExportResponse, PruneStatusView, Result } from "./types";
 import type { ArchiveResult } from "./archiver";
 import type { BlockInfo, TxIndexInfo } from "./decode";
 
@@ -25,6 +24,7 @@ export async function runWorkerWithDeps(
   client: {
     getHeadNumber: () => Promise<bigint>;
     exportBlocks: (cursor: Cursor | null, maxBytes: number) => Promise<Result<ExportResponse, ExportError>>;
+    getPruneStatus: () => Promise<PruneStatusView>;
   },
   options: { skipGc: boolean }
 ): Promise<void> {
@@ -42,6 +42,7 @@ export async function runWorkerWithDeps(
   let retryCount = 0;
   let lastIdleLogAt = 0;
   let stopRequested = false;
+  let lastPruneStatusAt = 0;
   let lastSizeDay: number | null = null;
   let lastSqliteBytes = 0;
   let lastArchiveBytes = 0;
@@ -71,6 +72,19 @@ export async function runWorkerWithDeps(
     }
     lastHead = headNumber;
 
+    const nowMs = Date.now();
+    if (config.pruneStatusPollMs > 0 && nowMs - lastPruneStatusAt >= config.pruneStatusPollMs) {
+      lastPruneStatusAt = nowMs;
+      try {
+        const status = await client.getPruneStatus();
+        db.setMeta("prune_status", JSON.stringify(normalizePruneStatus(status, nowMs)));
+      } catch (err) {
+        logWarn(config.chainId, "prune_status_failed", {
+          poll_ms: config.pruneStatusPollMs,
+          err: errMessage(err),
+        });
+      }
+    }
     let result: Result<ExportResponse, ExportError>;
     try {
       result = await client.exportBlocks(cursor, config.maxBytes);
@@ -251,7 +265,7 @@ export async function runWorkerWithDeps(
       const metricsDay = toDayKey();
       if (lastSizeDay !== metricsDay) {
         lastSqliteBytes = await getFileSize(config.dbPath);
-        lastArchiveBytes = await getDirSize(path.join(config.archiveDir, config.chainId));
+        lastArchiveBytes = db.getArchiveBytesSum();
         lastSizeDay = metricsDay;
       }
       try {
@@ -655,6 +669,23 @@ function toDayKey(): number {
   return Number(`${year}${month}${day}`);
 }
 
+function normalizePruneStatus(status: PruneStatusView, tsMs: number) {
+  return {
+    ts_ms: tsMs,
+    pruning_enabled: status.pruning_enabled,
+    prune_running: status.prune_running,
+    estimated_kept_bytes: status.estimated_kept_bytes.toString(),
+    high_water_bytes: status.high_water_bytes.toString(),
+    low_water_bytes: status.low_water_bytes.toString(),
+    hard_emergency_bytes: status.hard_emergency_bytes.toString(),
+    last_prune_at: status.last_prune_at.toString(),
+    pruned_before_block: status.pruned_before_block?.toString() ?? null,
+    oldest_kept_block: status.oldest_kept_block?.toString() ?? null,
+    oldest_kept_timestamp: status.oldest_kept_timestamp?.toString() ?? null,
+    need_prune: status.need_prune,
+  };
+}
+
 async function getFileSize(filePath: string): Promise<number> {
   try {
     const stat = await fs.stat(filePath);
@@ -667,29 +698,6 @@ async function getFileSize(filePath: string): Promise<number> {
   }
 }
 
-async function getDirSize(dirPath: string): Promise<number> {
-  let total = 0;
-  let entries: fs.Dirent[];
-  try {
-    entries = await fs.readdir(dirPath, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  for (const entry of entries) {
-    const full = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      total += await getDirSize(full);
-    } else if (entry.isFile()) {
-      try {
-        const stat = await fs.stat(full);
-        total += stat.size;
-      } catch {
-        // ベストエフォート
-      }
-    }
-  }
-  return total;
-}
 
 function enforceNextCursor(response: ExportResponse, cursor: Cursor): void {
   if (!response.next_cursor) {

@@ -188,6 +188,7 @@ test("max_bytes over limit triggers fatal exit", async () => {
       backoffInitialMs: 1,
       backoffMaxMs: 1,
       idlePollMs: 1,
+      pruneStatusPollMs: 0,
       fetchRootKey: false,
       archiveDir: dir,
       chainId: "local",
@@ -217,6 +218,7 @@ test("Pruned error triggers fatal exit", async () => {
       backoffInitialMs: 1,
       backoffMaxMs: 1,
       idlePollMs: 1,
+      pruneStatusPollMs: 0,
       fetchRootKey: false,
       archiveDir: dir,
       chainId: "local",
@@ -227,6 +229,136 @@ test("Pruned error triggers fatal exit", async () => {
       await runWorkerWithDeps(config, db, client, { skipGc: true });
     });
     db.close();
+  });
+});
+
+test("prune_status is persisted as JSON with string fields", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "db.sqlite");
+    const db = new IndexerDb(dbPath);
+    const cursor: Cursor = { block_number: 1n, segment: 0, byte_offset: 0 };
+    const err: ExportError = { Pruned: { pruned_before_block: 1n } };
+    const client = {
+      getHeadNumber: async () => 1n,
+      exportBlocks: async () => ({ Err: err } as Result<ExportResponse, ExportError>),
+      getPruneStatus: async () => ({
+        pruning_enabled: true,
+        prune_running: false,
+        estimated_kept_bytes: 123n,
+        high_water_bytes: 456n,
+        low_water_bytes: 400n,
+        hard_emergency_bytes: 900n,
+        last_prune_at: 10n,
+        pruned_before_block: 5n,
+        oldest_kept_block: 6n,
+        oldest_kept_timestamp: 7n,
+        need_prune: true,
+      }),
+    };
+    const config = {
+      canisterId: "x",
+      icHost: "http://localhost",
+      dbPath,
+      maxBytes: 10,
+      backoffInitialMs: 1,
+      backoffMaxMs: 1,
+      idlePollMs: 1,
+      pruneStatusPollMs: 1,
+      fetchRootKey: false,
+      archiveDir: dir,
+      chainId: "local",
+      zstdLevel: 1,
+    };
+    db.setCursor(cursor);
+    await expectExit(async () => {
+      await runWorkerWithDeps(config, db, client, { skipGc: true });
+    });
+    db.close();
+    const raw = readMetaValue(dbPath, "prune_status");
+    assert.ok(raw, "prune_status is missing");
+    const parsed = JSON.parse(raw as string);
+    assert.equal(parsed.v, 1);
+    assert.equal(parsed.status.estimated_kept_bytes, "123");
+    assert.equal(parsed.status.high_water_bytes, "456");
+    assert.equal(parsed.status.pruned_before_block, "5");
+  });
+});
+
+test("sqlite_bytes and archive_bytes are updated once per day", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "db.sqlite");
+    const db = new IndexerDb(dbPath);
+    const payload1 = buildBlockPayload(1n, 100n, [Buffer.alloc(32, 1)]);
+    const payload2 = buildBlockPayload(2n, 101n, [Buffer.alloc(32, 2)]);
+    const txIndex1 = buildTxIndexPayload(1n, 0, Buffer.alloc(32, 1));
+    const txIndex2 = buildTxIndexPayload(2n, 0, Buffer.alloc(32, 2));
+    const receipts = Buffer.alloc(0);
+    const responses: ExportResponse[] = [
+      buildResponseFromPayloads(1n, payload1, receipts, txIndex1),
+      buildResponseFromPayloads(2n, payload2, receipts, txIndex2),
+    ];
+    let idx = 0;
+    const client = {
+      getHeadNumber: async () => 2n,
+      exportBlocks: async () => {
+        if (idx < responses.length) {
+          const value = responses[idx];
+          idx += 1;
+          return { Ok: value } as Result<ExportResponse, ExportError>;
+        }
+        return { Err: { Pruned: { pruned_before_block: 0n } } } as Result<ExportResponse, ExportError>;
+      },
+      getPruneStatus: async () => ({
+        pruning_enabled: false,
+        prune_running: false,
+        estimated_kept_bytes: 0n,
+        high_water_bytes: 0n,
+        low_water_bytes: 0n,
+        hard_emergency_bytes: 0n,
+        last_prune_at: 0n,
+        pruned_before_block: null,
+        oldest_kept_block: null,
+        oldest_kept_timestamp: null,
+        need_prune: false,
+      }),
+    };
+    const config = {
+      canisterId: "x",
+      icHost: "http://localhost",
+      dbPath,
+      maxBytes: 1_000_000,
+      backoffInitialMs: 1,
+      backoffMaxMs: 1,
+      idlePollMs: 1,
+      pruneStatusPollMs: 0,
+      fetchRootKey: false,
+      archiveDir: dir,
+      chainId: "local",
+      zstdLevel: 1,
+    };
+    await expectExit(async () => {
+      await runWorkerWithDeps(config, db, client, { skipGc: true });
+    });
+    db.close();
+    const row = readMetricsRow(dbPath);
+    assert.ok(typeof row.sqlite_bytes === "number", "sqlite_bytes missing");
+    assert.ok(typeof row.archive_bytes === "number", "archive_bytes missing");
+    const archiveSum = readArchiveSum(dbPath);
+    assert.ok(row.archive_bytes <= archiveSum, "archive_bytes should not exceed current sum");
+  });
+});
+
+test("metrics sqlite/archive bytes keep first value within a day", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "db.sqlite");
+    const db = new IndexerDb(dbPath);
+    const day = 20250101;
+    db.addMetrics(day, 10, 5, 1, 0, 100, 200);
+    db.addMetrics(day, 1, 1, 1, 0);
+    db.close();
+    const row = readMetricsRow(dbPath);
+    assert.equal(row.sqlite_bytes, 100);
+    assert.equal(row.archive_bytes, 200);
   });
 });
 
@@ -347,6 +479,72 @@ async function expectExit(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+function readMetaValue(dbPath: string, key: string): string | null {
+  const db = new Database(dbPath);
+  const row = db.prepare("select value from meta where key = ?").get(key) as
+    | { value: string | Buffer }
+    | undefined;
+  db.close();
+  if (!row) {
+    return null;
+  }
+  if (typeof row.value === "string") {
+    return row.value;
+  }
+  if (row.value instanceof Buffer) {
+    return row.value.toString("utf8");
+  }
+  return null;
+}
+
+function readMetricsRow(dbPath: string): { sqlite_bytes: number | null; archive_bytes: number | null } {
+  const db = new Database(dbPath);
+  const row = db.prepare("select sqlite_bytes, archive_bytes from metrics_daily limit 1").get() as
+    | { sqlite_bytes: number | null; archive_bytes: number | null }
+    | undefined;
+  db.close();
+  if (!row) {
+    throw new Error("metrics row missing");
+  }
+  return row;
+}
+
+function readArchiveSum(dbPath: string): number {
+  const db = new Database(dbPath);
+  const row = db.prepare("select coalesce(sum(size_bytes), 0) as total from archive_parts").get() as
+    | { total: number }
+    | undefined;
+  db.close();
+  if (!row || typeof row.total !== "number") {
+    return 0;
+  }
+  return row.total;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function buildTxIndexPayload(blockNumber: bigint, txIndex: number, txHash: Buffer): Buffer {
+  const entry = Buffer.alloc(12);
+  entry.writeBigUInt64BE(blockNumber, 0);
+  entry.writeUInt32BE(txIndex, 8);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(entry.length, 0);
+  return Buffer.concat([txHash, len, entry]);
+}
+
+function buildResponseFromPayloads(
+  blockNumber: bigint,
+  block: Buffer,
+  receipts: Buffer,
+  txIndex: Buffer
+): ExportResponse {
+  const chunks: Chunk[] = [
+    { segment: 0, start: 0, payload_len: block.length, bytes: block },
+    { segment: 1, start: 0, payload_len: receipts.length, bytes: receipts },
+    { segment: 2, start: 0, payload_len: txIndex.length, bytes: txIndex },
+  ];
+  const next: Cursor = { block_number: blockNumber + 1n, segment: 0, byte_offset: 0 };
+  return { chunks, next_cursor: next };
 }

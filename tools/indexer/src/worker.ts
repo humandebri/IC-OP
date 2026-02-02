@@ -77,7 +77,12 @@ export async function runWorkerWithDeps(
       lastPruneStatusAt = nowMs;
       try {
         const status = await client.getPruneStatus();
-        db.setMeta("prune_status", JSON.stringify(normalizePruneStatus(status, nowMs)));
+        const payload = { v: 1, fetched_at_ms: nowMs, status };
+        db.transaction(() => {
+          db.setMeta("prune_status", jsonStringifyBigInt(payload));
+          db.setMeta("prune_status_at", String(nowMs));
+          db.setMeta("need_prune", status.need_prune ? "1" : "0");
+        });
       } catch (err) {
         logWarn(config.chainId, "prune_status_failed", {
           poll_ms: config.pruneStatusPollMs,
@@ -263,9 +268,12 @@ export async function runWorkerWithDeps(
       }
       const blocksIngested = 1;
       const metricsDay = toDayKey();
-      if (lastSizeDay !== metricsDay) {
-        lastSqliteBytes = await getFileSize(config.dbPath);
-        lastArchiveBytes = db.getArchiveBytesSum();
+      const updateSizes = lastSizeDay !== metricsDay;
+      let sqliteBytesToday: number | null = null;
+      let archiveBytesToday: number | null = null;
+      if (updateSizes) {
+        sqliteBytesToday = await getFileSize(config.dbPath);
+        archiveBytesToday = db.getArchiveBytesSum();
         lastSizeDay = metricsDay;
       }
       try {
@@ -301,8 +309,8 @@ export async function runWorkerWithDeps(
             archive.sizeBytes,
             blocksIngested,
             0,
-            lastSqliteBytes,
-            lastArchiveBytes
+            sqliteBytesToday,
+            archiveBytesToday
           );
           db.setMeta("last_head", headNumber.toString());
           db.setMeta("last_ingest_at", Date.now().toString());
@@ -669,21 +677,8 @@ function toDayKey(): number {
   return Number(`${year}${month}${day}`);
 }
 
-function normalizePruneStatus(status: PruneStatusView, tsMs: number) {
-  return {
-    ts_ms: tsMs,
-    pruning_enabled: status.pruning_enabled,
-    prune_running: status.prune_running,
-    estimated_kept_bytes: status.estimated_kept_bytes.toString(),
-    high_water_bytes: status.high_water_bytes.toString(),
-    low_water_bytes: status.low_water_bytes.toString(),
-    hard_emergency_bytes: status.hard_emergency_bytes.toString(),
-    last_prune_at: status.last_prune_at.toString(),
-    pruned_before_block: status.pruned_before_block?.toString() ?? null,
-    oldest_kept_block: status.oldest_kept_block?.toString() ?? null,
-    oldest_kept_timestamp: status.oldest_kept_timestamp?.toString() ?? null,
-    need_prune: status.need_prune,
-  };
+function jsonStringifyBigInt(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
 }
 
 async function getFileSize(filePath: string): Promise<number> {

@@ -50,3 +50,7 @@ npm run dev
 ## metrics_daily
 
 `sqlite_growth_bytes` は v0 では未更新（将来、DBサイズ差分で計測する）。
+
+## マイグレーション（SQLite）
+
+起動時に `PRAGMA user_version` を見て自動マイグレーションします。

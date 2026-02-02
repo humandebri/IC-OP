@@ -6,6 +6,7 @@ pub mod chain_state;
 pub mod constants;
 pub mod metrics;
 pub mod ordering;
+pub mod prune_config;
 pub mod prune_state;
 pub mod queue;
 pub mod receipt;
@@ -21,6 +22,7 @@ pub use constants::{
 };
 pub use metrics::{MetricsStateV1, MetricsWindowSummary, METRICS_BUCKETS};
 pub use ordering::{ReadyKey, SenderKey, SenderNonceKey};
+pub use prune_config::{PruneConfigV1, PrunePolicy};
 pub use prune_state::{PruneJournal, PruneStateV1};
 pub use queue::QueueMeta;
 pub use receipt::ReceiptLike;

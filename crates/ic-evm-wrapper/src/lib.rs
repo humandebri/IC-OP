@@ -257,10 +257,37 @@ pub enum TxKindView {
     IcSynthetic,
 }
 
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PrunePolicyView {
+    pub target_bytes: u64,
+    pub retain_days: u64,
+    pub retain_blocks: u64,
+    pub headroom_ratio_bps: u32,
+    pub hard_emergency_ratio_bps: u32,
+    pub timer_interval_ms: u64,
+    pub max_ops_per_tick: u32,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PruneStatusView {
+    pub pruning_enabled: bool,
+    pub prune_running: bool,
+    pub estimated_kept_bytes: u64,
+    pub high_water_bytes: u64,
+    pub low_water_bytes: u64,
+    pub hard_emergency_bytes: u64,
+    pub last_prune_at: u64,
+    pub pruned_before_block: Option<u64>,
+    pub oldest_kept_block: Option<u64>,
+    pub oldest_kept_timestamp: Option<u64>,
+    pub need_prune: bool,
+}
+
 #[ic_cdk::init]
 fn init() {
     init_meta_or_trap();
     init_stable_state();
+    schedule_prune();
 }
 
 #[ic_cdk::post_upgrade]
@@ -268,6 +295,7 @@ fn post_upgrade() {
     upgrade::post_upgrade();
     init_meta_or_trap();
     init_stable_state();
+    schedule_prune();
 }
 
 #[ic_cdk::pre_upgrade]
@@ -597,6 +625,47 @@ fn rpc_eth_chain_id() -> u64 {
 #[ic_cdk::query]
 fn rpc_eth_block_number() -> u64 {
     chain::get_head_number()
+}
+
+#[ic_cdk::update]
+fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
+    let core_policy = evm_db::chain_data::PrunePolicy {
+        target_bytes: policy.target_bytes,
+        retain_days: policy.retain_days,
+        retain_blocks: policy.retain_blocks,
+        headroom_ratio_bps: policy.headroom_ratio_bps,
+        hard_emergency_ratio_bps: policy.hard_emergency_ratio_bps,
+        timer_interval_ms: policy.timer_interval_ms,
+        max_ops_per_tick: policy.max_ops_per_tick,
+    };
+    chain::set_prune_policy(core_policy).map_err(|_| "set_prune_policy failed".to_string())?;
+    schedule_prune();
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn set_pruning_enabled(enabled: bool) -> Result<(), String> {
+    chain::set_pruning_enabled(enabled).map_err(|_| "set_pruning_enabled failed".to_string())?;
+    schedule_prune();
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_prune_status() -> PruneStatusView {
+    let status = chain::get_prune_status();
+    PruneStatusView {
+        pruning_enabled: status.pruning_enabled,
+        prune_running: status.prune_running,
+        estimated_kept_bytes: status.estimated_kept_bytes,
+        high_water_bytes: status.high_water_bytes,
+        low_water_bytes: status.low_water_bytes,
+        hard_emergency_bytes: status.hard_emergency_bytes,
+        last_prune_at: status.last_prune_at,
+        pruned_before_block: status.pruned_before_block,
+        oldest_kept_block: status.oldest_kept_block,
+        oldest_kept_timestamp: status.oldest_kept_timestamp,
+        need_prune: status.need_prune,
+    }
 }
 
 #[ic_cdk::query]
@@ -996,6 +1065,41 @@ fn schedule_mining() {
             mining_tick();
         });
     }
+}
+
+fn schedule_prune() {
+    let interval_ms = evm_db::stable_state::with_state_mut(|state| {
+        let mut config = *state.prune_config.get();
+        if !config.pruning_enabled {
+            return None;
+        }
+        if config.prune_scheduled {
+            return None;
+        }
+        config.prune_scheduled = true;
+        let interval_ms = config.timer_interval_ms;
+        state.prune_config.set(config);
+        Some(interval_ms)
+    });
+    if let Some(interval_ms) = interval_ms {
+        ic_cdk_timers::set_timer(std::time::Duration::from_millis(interval_ms), async move {
+            pruning_tick();
+        });
+    }
+}
+
+fn pruning_tick() {
+    let should_run = evm_db::stable_state::with_state_mut(|state| {
+        let mut config = *state.prune_config.get();
+        config.prune_scheduled = false;
+        let enabled = config.pruning_enabled;
+        state.prune_config.set(config);
+        enabled
+    });
+    if should_run {
+        let _ = chain::prune_tick();
+    }
+    schedule_prune();
 }
 
 fn mining_tick() {

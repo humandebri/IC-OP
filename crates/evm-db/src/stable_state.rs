@@ -4,8 +4,8 @@ use crate::blob_ptr::BlobPtr;
 use crate::blob_store::BlobStore;
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::chain_data::{
-    CallerKey, ChainStateV1, Head, MetricsStateV1, PruneJournal, PruneStateV1, QueueMeta,
-    SenderKey, SenderNonceKey, StoredTxBytes, TxId, ReadyKey,
+    CallerKey, ChainStateV1, Head, MetricsStateV1, PruneConfigV1, PruneJournal, PruneStateV1,
+    QueueMeta, SenderKey, SenderNonceKey, StoredTxBytes, TxId, ReadyKey,
 };
 use crate::chain_data::constants::CHAIN_ID;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
@@ -49,6 +49,7 @@ pub struct StableState {
     pub chain_state: StableCell<ChainStateV1, VMem>,
     pub metrics_state: StableCell<MetricsStateV1, VMem>,
     pub prune_state: StableCell<PruneStateV1, VMem>,
+    pub prune_config: StableCell<PruneConfigV1, VMem>,
     pub prune_journal: PruneJournalMap,
     pub caller_nonces: CallerNonces,
     pub tx_locs: TxLocs,
@@ -96,6 +97,7 @@ pub fn init_stable_state() {
     );
     let metrics_state = StableCell::init(get_memory(AppMemoryId::StateAux), MetricsStateV1::new());
     let prune_state = StableCell::init(get_memory(AppMemoryId::PruneState), PruneStateV1::new());
+    let prune_config = StableCell::init(get_memory(AppMemoryId::PruneConfig), PruneConfigV1::new());
     let prune_journal = StableBTreeMap::init(get_memory(AppMemoryId::PruneJournal));
     let caller_nonces = StableBTreeMap::init(get_memory(AppMemoryId::CallerNonces));
     let tx_locs = StableBTreeMap::init(get_memory(AppMemoryId::TxLocs));
@@ -125,6 +127,7 @@ pub fn init_stable_state() {
             chain_state,
             metrics_state,
             prune_state,
+            prune_config,
             prune_journal,
             caller_nonces,
             tx_locs,

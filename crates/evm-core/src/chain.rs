@@ -11,8 +11,8 @@ use evm_db::chain_data::constants::{
     DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE,
 };
 use evm_db::chain_data::{
-    BlockData, Head, PruneJournal, RawTx, ReceiptLike, ReadyKey, SenderKey, SenderNonceKey,
-    StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
+    BlockData, Head, PruneJournal, PrunePolicy, RawTx, ReceiptLike, ReadyKey, SenderKey,
+    SenderNonceKey, StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use evm_db::stable_state::{with_state, with_state_mut, StableState};
 use evm_db::types::keys::make_account_key;
@@ -52,6 +52,166 @@ pub struct PruneResult {
     pub did_work: bool,
     pub remaining: u64,
     pub pruned_before_block: Option<u64>,
+}
+
+pub struct PruneStatus {
+    pub pruning_enabled: bool,
+    pub prune_running: bool,
+    pub estimated_kept_bytes: u64,
+    pub high_water_bytes: u64,
+    pub low_water_bytes: u64,
+    pub hard_emergency_bytes: u64,
+    pub last_prune_at: u64,
+    pub pruned_before_block: Option<u64>,
+    pub oldest_kept_block: Option<u64>,
+    pub oldest_kept_timestamp: Option<u64>,
+    pub need_prune: bool,
+}
+
+pub fn set_prune_policy(policy: PrunePolicy) -> Result<(), ChainError> {
+    with_state_mut(|state| {
+        let mut config = *state.prune_config.get();
+        config.set_policy(policy);
+        state.prune_config.set(config);
+    });
+    Ok(())
+}
+
+pub fn set_pruning_enabled(enabled: bool) -> Result<(), ChainError> {
+    with_state_mut(|state| {
+        let mut config = *state.prune_config.get();
+        config.pruning_enabled = enabled;
+        state.prune_config.set(config);
+    });
+    Ok(())
+}
+
+pub fn get_prune_status() -> PruneStatus {
+    with_state(|state| {
+        let config = *state.prune_config.get();
+        let need_prune = should_prune_internal(state);
+        PruneStatus {
+            pruning_enabled: config.pruning_enabled,
+            prune_running: config.prune_running,
+            estimated_kept_bytes: config.estimated_kept_bytes,
+            high_water_bytes: config.high_water_bytes,
+            low_water_bytes: config.low_water_bytes,
+            hard_emergency_bytes: config.hard_emergency_bytes,
+            last_prune_at: config.last_prune_at,
+            pruned_before_block: state.prune_state.get().pruned_before(),
+            oldest_kept_block: config.oldest_block(),
+            oldest_kept_timestamp: config.oldest_timestamp(),
+            need_prune,
+        }
+    })
+}
+
+pub fn prune_tick() -> Result<PruneResult, ChainError> {
+    let should_run = with_state_mut(|state| {
+        let mut config = *state.prune_config.get();
+        if !config.pruning_enabled {
+            return false;
+        }
+        if config.prune_running {
+            return false;
+        }
+        if !should_prune_internal(state) {
+            return false;
+        }
+        config.prune_running = true;
+        state.prune_config.set(config);
+        true
+    });
+    if !should_run {
+        return Ok(PruneResult {
+            did_work: false,
+            remaining: 0,
+            pruned_before_block: with_state(|state| state.prune_state.get().pruned_before()),
+        });
+    }
+
+    let result = with_state_mut(|state| {
+        let policy = state.prune_config.get().policy();
+        let retain = compute_retain_count(state, policy);
+        let max_ops = policy.max_ops_per_tick;
+        let result = prune_blocks(retain, max_ops);
+        let mut config = *state.prune_config.get();
+        config.prune_running = false;
+        config.last_prune_at = state.head.get().timestamp;
+        state.prune_config.set(config);
+        result
+    });
+    result
+}
+
+fn should_prune_internal(state: &StableState) -> bool {
+    let config = *state.prune_config.get();
+    if !config.pruning_enabled {
+        return false;
+    }
+    if config.target_bytes == 0 {
+        return false;
+    }
+    let now = state.head.get().timestamp;
+    if let Some(oldest_ts) = config.oldest_timestamp() {
+        if config.retain_days > 0 {
+            let retain_secs = config.retain_days.saturating_mul(86_400);
+            if oldest_ts < now.saturating_sub(retain_secs) {
+                return true;
+            }
+        }
+    }
+    if config.estimated_kept_bytes > config.high_water_bytes {
+        return true;
+    }
+    false
+}
+
+fn compute_retain_count(state: &StableState, policy: PrunePolicy) -> u64 {
+    let head = state.head.get().number;
+    let emergency = policy.target_bytes > 0
+        && state.prune_config.get().estimated_kept_bytes > state.prune_config.get().hard_emergency_bytes;
+    if emergency {
+        return 1;
+    }
+    let mut retain_min_block = 0u64;
+    if policy.retain_blocks > 0 {
+        retain_min_block = head.saturating_sub(policy.retain_blocks);
+    }
+    if policy.retain_days > 0 {
+        let retain_secs = policy.retain_days.saturating_mul(86_400);
+        let cutoff = state.head.get().timestamp.saturating_sub(retain_secs);
+        if let Some((block, _)) = find_block_at_timestamp(state, cutoff) {
+            if block > retain_min_block {
+                retain_min_block = block;
+            }
+        }
+    }
+    let retain = head.saturating_sub(retain_min_block);
+    if retain == 0 { 1 } else { retain }
+}
+
+fn find_block_at_timestamp(state: &StableState, cutoff_ts: u64) -> Option<(u64, u64)> {
+    let head = state.head.get().number;
+    let mut low = state.prune_config.get().oldest_block().unwrap_or(0);
+    let mut high = head;
+    let mut best: Option<(u64, u64)> = None;
+    while low <= high {
+        let mid = low + ((high - low) / 2);
+        if let Some(block) = load_block(state, mid) {
+            if block.timestamp <= cutoff_ts {
+                best = Some((mid, block.timestamp));
+                low = mid.saturating_add(1);
+            } else if mid == 0 {
+                break;
+            } else {
+                high = mid.saturating_sub(1);
+            }
+        } else {
+            break;
+        }
+    }
+    best
 }
 
 pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
@@ -437,18 +597,27 @@ pub fn get_receipt(tx_id: &TxId) -> Option<ReceiptLike> {
 
 fn store_block(state: &mut StableState, block: &BlockData) -> evm_db::blob_ptr::BlobPtr {
     let bytes = block.to_bytes().into_owned();
-    state
+    let ptr = state
         .blob_store
         .store_bytes(&bytes)
-        .unwrap_or_else(|_| panic!("blob_store: store_block failed"))
+        .unwrap_or_else(|_| panic!("blob_store: store_block failed"));
+    increment_estimated_kept_bytes(state, ptr.class);
+    let mut config = *state.prune_config.get();
+    if config.oldest_block().is_none() {
+        config.set_oldest(block.number, block.timestamp);
+        state.prune_config.set(config);
+    }
+    ptr
 }
 
 fn store_receipt(state: &mut StableState, receipt: &ReceiptLike) -> evm_db::blob_ptr::BlobPtr {
     let bytes = receipt.to_bytes().into_owned();
-    state
+    let ptr = state
         .blob_store
         .store_bytes(&bytes)
-        .unwrap_or_else(|_| panic!("blob_store: store_receipt failed"))
+        .unwrap_or_else(|_| panic!("blob_store: store_receipt failed"));
+    increment_estimated_kept_bytes(state, ptr.class);
+    ptr
 }
 
 fn store_tx_index_entry(
@@ -456,10 +625,12 @@ fn store_tx_index_entry(
     entry: TxIndexEntry,
 ) -> evm_db::blob_ptr::BlobPtr {
     let bytes = entry.to_bytes().into_owned();
-    state
+    let ptr = state
         .blob_store
         .store_bytes(&bytes)
-        .unwrap_or_else(|_| panic!("blob_store: store_tx_index failed"))
+        .unwrap_or_else(|_| panic!("blob_store: store_tx_index failed"));
+    increment_estimated_kept_bytes(state, ptr.class);
+    ptr
 }
 
 fn load_block(state: &StableState, number: u64) -> Option<BlockData> {
@@ -645,12 +816,14 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
                     .blob_store
                     .mark_free(&ptr)
                     .map_err(|_| ChainError::ExecFailed(None))?;
+                decrement_estimated_kept_bytes(state, ptr.class);
             }
             state.prune_journal.remove(&next.saturating_sub(1));
             prune_state.clear_journal();
         }
         prune_state.next_prune_block = next;
         state.prune_state.set(prune_state);
+        refresh_oldest(state);
         let remaining = if next > prune_before {
             0
         } else {
@@ -692,11 +865,13 @@ fn recover_prune_journal(state: &mut evm_db::stable_state::StableState) -> Resul
                 .blob_store
                 .mark_free(ptr)
                 .map_err(|_| ChainError::ExecFailed(None))?;
+            decrement_estimated_kept_bytes(state, ptr.class);
         }
         state.prune_journal.remove(&journal_block);
     }
     prune_state.clear_journal();
     state.prune_state.set(prune_state);
+    refresh_oldest(state);
     Ok(())
 }
 
@@ -718,6 +893,38 @@ fn collect_ptrs_for_block(
         }
     }
     out
+}
+
+fn increment_estimated_kept_bytes(state: &mut StableState, class: u32) {
+    let mut config = *state.prune_config.get();
+    config.estimated_kept_bytes = config
+        .estimated_kept_bytes
+        .saturating_add(u64::from(class));
+    state.prune_config.set(config);
+}
+
+fn decrement_estimated_kept_bytes(state: &mut StableState, class: u32) {
+    let mut config = *state.prune_config.get();
+    config.estimated_kept_bytes = config
+        .estimated_kept_bytes
+        .saturating_sub(u64::from(class));
+    state.prune_config.set(config);
+}
+
+fn refresh_oldest(state: &mut StableState) {
+    let next = match state.prune_state.get().pruned_before() {
+        Some(value) => value.saturating_add(1),
+        None => 0,
+    };
+    if let Some(block) = load_block(state, next) {
+        let mut config = *state.prune_config.get();
+        config.set_oldest(next, block.timestamp);
+        state.prune_config.set(config);
+        return;
+    }
+    let mut config = *state.prune_config.get();
+    config.clear_oldest();
+    state.prune_config.set(config);
 }
 
 pub struct QueueItem {

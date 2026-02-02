@@ -4,6 +4,8 @@ import Database from "better-sqlite3";
 import { cursorFromJson, cursorToJson } from "./cursor";
 import { Cursor } from "./types";
 
+const SCHEMA_VERSION = 3;
+
 export type BlockRow = {
   number: bigint;
   hash: Buffer | null;
@@ -30,7 +32,7 @@ export class IndexerDb {
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
-    this.db.exec(schemaSql());
+    migrate(this.db);
     this.getMetaStmt = this.db.prepare("SELECT value FROM meta WHERE key = ?");
     this.upsertMetaStmt = this.db.prepare(
       "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -137,7 +139,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function schemaSql(): string {
+function migrate(db: Database.Database): void {
+  const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
+  let version = row.user_version ?? 0;
+  if (version < 1) {
+    db.exec(schemaV1());
+    version = 1;
+  }
+  if (version < 2) {
+    db.exec(schemaV2());
+    version = 2;
+  }
+  if (version < 3) {
+    db.exec(schemaV3());
+    version = 3;
+  }
+  if (version !== SCHEMA_VERSION) {
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+}
+
+function schemaV1(): string {
   return `
     create table if not exists meta (
       key text primary key,
@@ -156,7 +178,11 @@ function schemaSql(): string {
       block_number integer not null,
       tx_index integer not null
     );
+  `;
+}
 
+function schemaV2(): string {
+  return `
     create table if not exists metrics_daily (
       day integer primary key,
       raw_bytes integer,
@@ -165,7 +191,11 @@ function schemaSql(): string {
       blocks_ingested integer,
       errors integer
     );
+  `;
+}
 
+function schemaV3(): string {
+  return `
     create table if not exists archive_parts (
       block_number integer primary key,
       path text not null,

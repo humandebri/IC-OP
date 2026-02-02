@@ -10,6 +10,7 @@ export const MIGRATIONS = [
   "001_init.sql",
   "002_metrics.sql",
   "003_archive.sql",
+  "004_archive_metrics.sql",
 ] as const;
 
 export function applyMigrations(db: Database.Database, migrations: readonly string[]): void {

@@ -44,11 +44,12 @@ export class IndexerDb {
       "INSERT INTO txs(tx_hash, block_number, tx_index) VALUES(?, ?, ?) ON CONFLICT(tx_hash) DO UPDATE SET block_number = excluded.block_number, tx_index = excluded.tx_index"
     );
     this.upsertMetricsStmt = this.db.prepare(
-      "INSERT INTO metrics_daily(day, raw_bytes, compressed_bytes, sqlite_growth_bytes, blocks_ingested, errors) VALUES(?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO metrics_daily(day, raw_bytes, compressed_bytes, sqlite_growth_bytes, archive_bytes, blocks_ingested, errors) VALUES(?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(day) DO UPDATE SET " +
         "raw_bytes = raw_bytes + excluded.raw_bytes, " +
         "compressed_bytes = compressed_bytes + excluded.compressed_bytes, " +
-        "sqlite_growth_bytes = excluded.sqlite_growth_bytes, " +
+        "sqlite_growth_bytes = COALESCE(excluded.sqlite_growth_bytes, sqlite_growth_bytes), " +
+        "archive_bytes = COALESCE(excluded.archive_bytes, archive_bytes), " +
         "blocks_ingested = blocks_ingested + excluded.blocks_ingested, " +
         "errors = errors + excluded.errors"
     );
@@ -94,9 +95,24 @@ export class IndexerDb {
     this.upsertTxStmt.run(row.tx_hash, row.block_number, row.tx_index);
   }
 
-  addMetrics(day: number, rawBytes: number, compressedBytes: number, blocksIngested: number, errors: number): void {
-    // sqlite_growth_bytes は v0 では未更新（将来、DBサイズ差分で計測）
-    this.upsertMetricsStmt.run(day, rawBytes, compressedBytes, null, blocksIngested, errors);
+  addMetrics(
+    day: number,
+    rawBytes: number,
+    compressedBytes: number,
+    blocksIngested: number,
+    errors: number,
+    sqliteBytes: number | null = null,
+    archiveBytes: number | null = null
+  ): void {
+    this.upsertMetricsStmt.run(
+      day,
+      rawBytes,
+      compressedBytes,
+      sqliteBytes,
+      archiveBytes,
+      blocksIngested,
+      errors
+    );
   }
 
   addArchive(params: {

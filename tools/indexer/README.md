@@ -44,6 +44,11 @@ npm run dev
 * segment は **0/1/2**
 * byte_offset は **0..=u32**
 
+## idle / retry（運用）
+
+* 追いつき時は `INDEXER_IDLE_POLL_MS` で **固定間隔**ポーリング  
+* **指数バックオフはネットワーク失敗時のみ**
+
 ## archive_parts
 
 `archive_parts` は **再構築可能なキャッシュ**。消しても canister から再作成できる。

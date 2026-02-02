@@ -23,6 +23,7 @@ Edge Functions だけでも可能だが、EVM logs が増えると **CPU/メモ�
 * `export_blocks(cursor, max_bytes)` を **cursor 기반**で繰り返し取得  
 * 取得した `BlockBundle` を **同一ブロック単位**で DB に保存  
 * `cursor` は DB に保存（再起動で継続可能）
+  * 保存形式は **JSON固定**（後述）
 
 推奨 `max_bytes`:
 * 1,000,000〜1,500,000 bytes  
@@ -203,8 +204,8 @@ create index if not exists receipts_block
 
 ### 6.1 poll 間隔（推奨）
 
-* 基本: **1〜3秒**  
-* head が動かないときは **指数バックオフ**（最大 30s）
+* **追いつき時は固定間隔**（例: 500ms〜2s）
+* **指数バックオフはネットワーク失敗時のみ**（最大 5s など）
 * head が進んだら即時で追従
 
 ### 6.2 並列化の方針
@@ -377,6 +378,23 @@ cursor: opt Cursor
 * **追いついている場合**: `chunks = []` かつ `next_cursor = cursor`  
   * indexer は同じ cursor で再試行できる
 
+### 7.14 Cursor JSON（ワーカー保存形式、固定）
+
+ワーカー側の **DB保存形式**は JSON 固定。
+
+```
+{
+  "v": 1,
+  "block_number": "u64",
+  "segment": 0,
+  "byte_offset": 0
+}
+```
+
+* `block_number` は **10進ASCIIの文字列**（先頭0なし、"0"は許可）
+* `segment` は **0/1/2**
+* `byte_offset` は **0..=u32**
+
 ### 7.12 export API と BlockBundle の分離（明確化）
 
 * export API は **Chunk のみ**を返す  
@@ -399,6 +417,11 @@ cursor: opt Cursor
 * `db_write_latency_ms`
 * `db_batch_size`
 * `errors_per_min`
+
+### 8.4 archive_parts（キャッシュ）
+
+`archive_parts` は **再構築可能なキャッシュ**。  
+DBに紐づかないアーカイブファイルは **起動時GCで削除される可能性**がある。
 
 ### 8.2 アラート例
 

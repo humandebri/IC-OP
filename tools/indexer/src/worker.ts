@@ -1,6 +1,8 @@
 /// <reference path="./globals.d.ts" />
 // どこで: indexer本体 / 何を: pull→検証→DBコミット / なぜ: 仕様のコミット境界を守るため
 
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { Config, sleep } from "./config";
 import { createClient } from "./client";
 import { IndexerDb } from "./db";
@@ -40,6 +42,9 @@ export async function runWorkerWithDeps(
   let retryCount = 0;
   let lastIdleLogAt = 0;
   let stopRequested = false;
+  let lastSizeDay: number | null = null;
+  let lastSqliteBytes = 0;
+  let lastArchiveBytes = 0;
 
   setupSignalHandlers(config.chainId, () => {
     stopRequested = true;
@@ -243,6 +248,12 @@ export async function runWorkerWithDeps(
         process.exit(1);
       }
       const blocksIngested = 1;
+      const metricsDay = toDayKey();
+      if (lastSizeDay !== metricsDay) {
+        lastSqliteBytes = await getFileSize(config.dbPath);
+        lastArchiveBytes = await getDirSize(path.join(config.archiveDir, config.chainId));
+        lastSizeDay = metricsDay;
+      }
       try {
         db.transaction(() => {
           db.upsertBlock({
@@ -270,7 +281,15 @@ export async function runWorkerWithDeps(
             throw new Error("cursor missing on commit");
           }
           db.setCursor(cursor);
-          db.addMetrics(toDayKey(), archive.rawBytes, archive.sizeBytes, blocksIngested, 0);
+          db.addMetrics(
+            metricsDay,
+            archive.rawBytes,
+            archive.sizeBytes,
+            blocksIngested,
+            0,
+            lastSqliteBytes,
+            lastArchiveBytes
+          );
           db.setMeta("last_head", headNumber.toString());
           db.setMeta("last_ingest_at", Date.now().toString());
         });
@@ -634,6 +653,42 @@ function toDayKey(): number {
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
   const day = String(now.getUTCDate()).padStart(2, "0");
   return Number(`${year}${month}${day}`);
+}
+
+async function getFileSize(filePath: string): Promise<number> {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      return 0;
+    }
+    return stat.size;
+  } catch {
+    return 0;
+  }
+}
+
+async function getDirSize(dirPath: string): Promise<number> {
+  let total = 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += await getDirSize(full);
+    } else if (entry.isFile()) {
+      try {
+        const stat = await fs.stat(full);
+        total += stat.size;
+      } catch {
+        // ベストエフォート
+      }
+    }
+  }
+  return total;
 }
 
 function enforceNextCursor(response: ExportResponse, cursor: Cursor): void {

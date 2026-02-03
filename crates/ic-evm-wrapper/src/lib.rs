@@ -5,7 +5,7 @@ use ic_cdk::api::{canister_cycle_balance, debug_print, is_controller, msg_caller
 use evm_db::chain_data::constants::MAX_RETURN_DATA;
 use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::{
-    BlockData, OpsConfigV1, OpsMode, ReceiptLike, StoredTx, StoredTxBytes,
+    BlockData, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, OpsConfigV1, OpsMode, ReceiptLike, StoredTx, StoredTxBytes,
     TxId, TxKind, TxLoc, TxLocKind,
 };
 use evm_db::meta::{current_schema_version, ensure_meta_initialized, get_meta, mark_migration_applied};
@@ -86,8 +86,28 @@ pub struct OpsStatusView {
     pub last_check_ts: u64,
     pub mode: OpsModeView,
     pub safe_stop_latched: bool,
+    pub l1_fee_fallback_count: u64,
     pub needs_migration: bool,
     pub schema_version: u32,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct L1BlockInfoParamsView {
+    pub spec_id: u8,
+    pub empty_ecotone_scalars: bool,
+    pub l1_fee_overhead: u128,
+    pub l1_base_fee_scalar: u128,
+    pub l1_blob_base_fee_scalar: u128,
+    pub operator_fee_scalar: u128,
+    pub operator_fee_constant: u128,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct L1BlockInfoSnapshotView {
+    pub enabled: bool,
+    pub l2_block_number: u64,
+    pub l1_base_fee: u128,
+    pub l1_blob_base_fee: u128,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -123,6 +143,9 @@ pub struct ReceiptView {
     pub status: u8,
     pub gas_used: u64,
     pub effective_gas_price: u64,
+    pub l1_data_fee: u128,
+    pub operator_fee: u128,
+    pub total_fee: u128,
     pub return_data_hash: Vec<u8>,
     pub return_data: Option<Vec<u8>>,
     pub contract_address: Option<Vec<u8>>,
@@ -240,6 +263,9 @@ pub struct EthReceiptView {
     pub status: u8,
     pub gas_used: u64,
     pub effective_gas_price: u64,
+    pub l1_data_fee: u128,
+    pub operator_fee: u128,
+    pub total_fee: u128,
     pub contract_address: Option<Vec<u8>>,
     pub logs: Vec<LogView>,
 }
@@ -843,6 +869,7 @@ fn get_ops_status() -> OpsStatusView {
             last_check_ts: ops.last_check_ts,
             mode: mode_to_view(ops.mode),
             safe_stop_latched: ops.safe_stop_latched,
+            l1_fee_fallback_count: ops.l1_fee_fallback_count,
             needs_migration: meta.needs_migration,
             schema_version: meta.schema_version,
         }
@@ -866,6 +893,49 @@ fn set_ops_config(config: OpsConfigView) -> Result<(), String> {
         });
     });
     observe_cycles();
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_l1_block_info_params() -> L1BlockInfoParamsView {
+    with_state(|state| l1_params_to_view(*state.l1_block_info_params.get()))
+}
+
+#[ic_cdk::query]
+fn get_l1_block_info_snapshot() -> L1BlockInfoSnapshotView {
+    with_state(|state| l1_snapshot_to_view(*state.l1_block_info_snapshot.get()))
+}
+
+#[ic_cdk::update]
+fn set_l1_block_info_params(params: L1BlockInfoParamsView) -> Result<(), String> {
+    require_controller()?;
+    if let Some(reason) = reject_write_reason() {
+        return Err(reason);
+    }
+    if !is_valid_l1_spec_id(params.spec_id) {
+        return Err("invalid spec_id".to_string());
+    }
+    let next = l1_params_from_view(params);
+    evm_db::stable_state::with_state_mut(|state| {
+        let _ = state.l1_block_info_params.set(next);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn set_l1_block_info_snapshot(snapshot: L1BlockInfoSnapshotView) -> Result<(), String> {
+    require_controller()?;
+    if let Some(reason) = reject_write_reason() {
+        return Err(reason);
+    }
+    let producing = with_state(|state| state.chain_state.get().is_producing);
+    if producing {
+        return Err("BusyProducing".to_string());
+    }
+    let next = l1_snapshot_from_view(snapshot);
+    evm_db::stable_state::with_state_mut(|state| {
+        let _ = state.l1_block_info_snapshot.set(next);
+    });
     Ok(())
 }
 
@@ -1023,6 +1093,9 @@ fn receipt_to_view(receipt: ReceiptLike) -> ReceiptView {
         status: receipt.status,
         gas_used: receipt.gas_used,
         effective_gas_price: receipt.effective_gas_price,
+        l1_data_fee: receipt.l1_data_fee,
+        operator_fee: receipt.operator_fee,
+        total_fee: receipt.total_fee,
         return_data_hash: receipt.return_data_hash.to_vec(),
         return_data: clamp_return_data(receipt.return_data),
         contract_address: receipt.contract_address.map(|v| v.to_vec()),
@@ -1176,6 +1249,9 @@ fn receipt_to_eth_view(receipt: ReceiptLike) -> EthReceiptView {
         status: receipt.status,
         gas_used: receipt.gas_used,
         effective_gas_price: receipt.effective_gas_price,
+        l1_data_fee: receipt.l1_data_fee,
+        operator_fee: receipt.operator_fee,
+        total_fee: receipt.total_fee,
         contract_address: receipt.contract_address.map(|v| v.to_vec()),
         logs: receipt.logs.into_iter().map(log_to_view).collect(),
     }
@@ -1187,6 +1263,54 @@ fn mode_to_view(mode: OpsMode) -> OpsModeView {
         OpsMode::Low => OpsModeView::Low,
         OpsMode::Critical => OpsModeView::Critical,
     }
+}
+
+fn l1_params_to_view(params: L1BlockInfoParamsV1) -> L1BlockInfoParamsView {
+    L1BlockInfoParamsView {
+        spec_id: params.spec_id,
+        empty_ecotone_scalars: params.empty_ecotone_scalars,
+        l1_fee_overhead: params.l1_fee_overhead,
+        l1_base_fee_scalar: params.l1_base_fee_scalar,
+        l1_blob_base_fee_scalar: params.l1_blob_base_fee_scalar,
+        operator_fee_scalar: params.operator_fee_scalar,
+        operator_fee_constant: params.operator_fee_constant,
+    }
+}
+
+fn l1_params_from_view(params: L1BlockInfoParamsView) -> L1BlockInfoParamsV1 {
+    L1BlockInfoParamsV1 {
+        schema_version: 1,
+        spec_id: params.spec_id,
+        empty_ecotone_scalars: params.empty_ecotone_scalars,
+        l1_fee_overhead: params.l1_fee_overhead,
+        l1_base_fee_scalar: params.l1_base_fee_scalar,
+        l1_blob_base_fee_scalar: params.l1_blob_base_fee_scalar,
+        operator_fee_scalar: params.operator_fee_scalar,
+        operator_fee_constant: params.operator_fee_constant,
+    }
+}
+
+fn l1_snapshot_to_view(snapshot: L1BlockInfoSnapshotV1) -> L1BlockInfoSnapshotView {
+    L1BlockInfoSnapshotView {
+        enabled: snapshot.enabled,
+        l2_block_number: snapshot.l2_block_number,
+        l1_base_fee: snapshot.l1_base_fee,
+        l1_blob_base_fee: snapshot.l1_blob_base_fee,
+    }
+}
+
+fn l1_snapshot_from_view(snapshot: L1BlockInfoSnapshotView) -> L1BlockInfoSnapshotV1 {
+    L1BlockInfoSnapshotV1 {
+        schema_version: 1,
+        enabled: snapshot.enabled,
+        l2_block_number: snapshot.l2_block_number,
+        l1_base_fee: snapshot.l1_base_fee,
+        l1_blob_base_fee: snapshot.l1_blob_base_fee,
+    }
+}
+
+fn is_valid_l1_spec_id(spec_id: u8) -> bool {
+    (100..=110).contains(&spec_id)
 }
 
 fn require_controller() -> Result<(), String> {
@@ -1410,7 +1534,7 @@ pub fn export_did() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_return_data, tx_id_from_bytes};
+    use super::{clamp_return_data, is_valid_l1_spec_id, tx_id_from_bytes};
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
 
     #[test]
@@ -1437,6 +1561,18 @@ mod tests {
         let input = vec![9u8; 32];
         let out = tx_id_from_bytes(input.clone()).expect("tx_id");
         assert_eq!(out.0.to_vec(), input);
+    }
+
+    #[test]
+    fn l1_spec_id_validation_accepts_known_range() {
+        assert!(is_valid_l1_spec_id(100));
+        assert!(is_valid_l1_spec_id(110));
+    }
+
+    #[test]
+    fn l1_spec_id_validation_rejects_unknown_values() {
+        assert!(!is_valid_l1_spec_id(99));
+        assert!(!is_valid_l1_spec_id(111));
     }
 
 }

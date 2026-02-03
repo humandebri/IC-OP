@@ -26,6 +26,9 @@ pub struct ReceiptLike {
     pub status: u8,
     pub gas_used: u64,
     pub effective_gas_price: u64,
+    pub l1_data_fee: u128,
+    pub operator_fee: u128,
+    pub total_fee: u128,
     pub return_data_hash: [u8; HASH_LEN],
     pub return_data: Vec<u8>,
     pub contract_address: Option<[u8; RECEIPT_CONTRACT_ADDR_LEN]>,
@@ -40,13 +43,17 @@ impl Storable for ReceiptLike {
         if self.logs.len() > MAX_LOGS_PER_TX {
             ic_cdk::trap("receipt: too many logs");
         }
-        let mut out = Vec::with_capacity(64);
+        let mut out = Vec::with_capacity(96);
+        out.extend_from_slice(&RECEIPT_V2_MAGIC);
         out.extend_from_slice(&self.tx_id.0);
         out.extend_from_slice(&self.block_number.to_be_bytes());
         out.extend_from_slice(&self.tx_index.to_be_bytes());
         out.push(self.status);
         out.extend_from_slice(&self.gas_used.to_be_bytes());
         out.extend_from_slice(&self.effective_gas_price.to_be_bytes());
+        out.extend_from_slice(&self.l1_data_fee.to_be_bytes());
+        out.extend_from_slice(&self.operator_fee.to_be_bytes());
+        out.extend_from_slice(&self.total_fee.to_be_bytes());
         out.extend_from_slice(&self.return_data_hash);
         let data_len = u32::try_from(self.return_data.len())
             .unwrap_or_else(|_| ic_cdk::trap("receipt: return_data len"));
@@ -97,6 +104,10 @@ impl Storable for ReceiptLike {
             return corrupt_receipt();
         }
         let mut offset = 0usize;
+        let is_v2 = data.starts_with(&RECEIPT_V2_MAGIC);
+        if is_v2 {
+            offset += RECEIPT_V2_MAGIC.len();
+        }
         let tx_id = match read_array::<32>(data, &mut offset) {
             Some(value) => value,
             None => return corrupt_receipt(),
@@ -120,6 +131,23 @@ impl Storable for ReceiptLike {
         let effective_gas_price = match read_u64(data, &mut offset) {
             Some(value) => value,
             None => return corrupt_receipt(),
+        };
+        let (l1_data_fee, operator_fee, total_fee) = if is_v2 {
+            let l1_data_fee = match read_array::<16>(data, &mut offset) {
+                Some(value) => u128::from_be_bytes(value),
+                None => return corrupt_receipt(),
+            };
+            let operator_fee = match read_array::<16>(data, &mut offset) {
+                Some(value) => u128::from_be_bytes(value),
+                None => return corrupt_receipt(),
+            };
+            let total_fee = match read_array::<16>(data, &mut offset) {
+                Some(value) => u128::from_be_bytes(value),
+                None => return corrupt_receipt(),
+            };
+            (l1_data_fee, operator_fee, total_fee)
+        } else {
+            (0u128, 0u128, 0u128)
         };
         let return_data_hash = match read_array::<32>(data, &mut offset) {
             Some(value) => value,
@@ -213,6 +241,9 @@ impl Storable for ReceiptLike {
             status,
             gas_used,
             effective_gas_price,
+            l1_data_fee,
+            operator_fee,
+            total_fee,
             return_data_hash,
             return_data,
             contract_address,
@@ -235,9 +266,14 @@ fn corrupt_receipt() -> ReceiptLike {
         status: 0,
         gas_used: 0,
         effective_gas_price: 0,
+        l1_data_fee: 0,
+        operator_fee: 0,
+        total_fee: 0,
         return_data_hash: [0u8; HASH_LEN],
         return_data: Vec::new(),
         contract_address: None,
         logs: Vec::new(),
     }
 }
+
+const RECEIPT_V2_MAGIC: [u8; 8] = *b"rcptv2\0\x02";

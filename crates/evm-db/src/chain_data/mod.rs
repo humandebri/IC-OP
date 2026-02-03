@@ -4,6 +4,7 @@ pub mod block;
 pub mod caller;
 pub mod chain_state;
 pub mod constants;
+pub mod l1_block_info;
 pub mod metrics;
 pub mod ops;
 pub mod ordering;
@@ -17,6 +18,10 @@ pub mod tx;
 pub use block::{BlockData, Head};
 pub use caller::CallerKey;
 pub use chain_state::ChainStateV1;
+pub use l1_block_info::{
+    L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, L1_BLOCK_INFO_PARAMS_SIZE_U32,
+    L1_BLOCK_INFO_SNAPSHOT_SIZE_U32,
+};
 pub use constants::{
     CALLER_KEY_LEN, CHAIN_STATE_SIZE_U32, HASH_LEN, MAX_PRINCIPAL_LEN, MAX_TXS_PER_BLOCK,
     MAX_TX_SIZE, RECEIPT_CONTRACT_ADDR_LEN, TX_ID_LEN,

@@ -53,10 +53,21 @@ pub const MAX_LOGS_PER_TX: usize = 64;
 pub const MAX_LOG_TOPICS: usize = 4;
 pub const MAX_LOG_DATA: usize = 4096;
 pub const MAX_LOG_DATA_U32: u32 = 4096;
+pub const RECEIPT_V2_EXTRA_U32: u32 = 8 + 16 + 16 + 16;
 
 // Receiptの最大サイズ（固定部 + 可変部の上限）
 pub const RECEIPT_MAX_SIZE_U32: u32 =
-    32 + 8 + 4 + 1 + 8 + 8 + 4 + (MAX_RETURN_DATA as u32) + 1 + RECEIPT_CONTRACT_ADDR_LEN_U32
+    RECEIPT_V2_EXTRA_U32
+        + 32
+        + 8
+        + 4
+        + 1
+        + 8
+        + 8
+        + 4
+        + (MAX_RETURN_DATA as u32)
+        + 1
+        + RECEIPT_CONTRACT_ADDR_LEN_U32
         + 4
         + (MAX_LOGS_PER_TX as u32)
             * (20 + 4 + (MAX_LOG_TOPICS as u32) * 32 + 4 + MAX_LOG_DATA_U32);

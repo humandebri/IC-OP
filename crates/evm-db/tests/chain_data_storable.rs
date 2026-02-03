@@ -2,8 +2,8 @@
 
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{
-    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, StoredTx, StoredTxBytes,
-    TxId, TxIndexEntry, TxKind, TxLoc,
+    BlockData, CallerKey, ChainStateV1, Head, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1,
+    QueueMeta, ReceiptLike, StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use ic_stable_structures::Storable;
 
@@ -82,6 +82,9 @@ fn receipt_roundtrip() {
         status: 1,
         gas_used: 21000,
         effective_gas_price: 0,
+        l1_data_fee: 11,
+        operator_fee: 22,
+        total_fee: 33,
         return_data_hash: [0x55u8; 32],
         return_data: vec![1, 2, 3],
         contract_address: None,
@@ -94,6 +97,54 @@ fn receipt_roundtrip() {
     let bytes = receipt.to_bytes();
     let decoded = ReceiptLike::from_bytes(bytes);
     assert_eq!(receipt, decoded);
+}
+
+#[test]
+fn l1_block_info_roundtrip() {
+    let params = L1BlockInfoParamsV1 {
+        schema_version: 1,
+        spec_id: 107,
+        empty_ecotone_scalars: false,
+        l1_fee_overhead: 1,
+        l1_base_fee_scalar: 2,
+        l1_blob_base_fee_scalar: 3,
+        operator_fee_scalar: 4,
+        operator_fee_constant: 5,
+    };
+    let params_decoded = L1BlockInfoParamsV1::from_bytes(params.to_bytes());
+    assert_eq!(params, params_decoded);
+
+    let snapshot = L1BlockInfoSnapshotV1 {
+        schema_version: 1,
+        enabled: true,
+        l2_block_number: 10,
+        l1_base_fee: 20,
+        l1_blob_base_fee: 30,
+    };
+    let snapshot_decoded = L1BlockInfoSnapshotV1::from_bytes(snapshot.to_bytes());
+    assert_eq!(snapshot, snapshot_decoded);
+}
+
+#[test]
+fn receipt_v1_decode_backfills_new_fee_fields_with_zero() {
+    let tx_id = TxId([0x77u8; 32]);
+    let mut old = Vec::new();
+    old.extend_from_slice(&tx_id.0);
+    old.extend_from_slice(&2u64.to_be_bytes());
+    old.extend_from_slice(&0u32.to_be_bytes());
+    old.push(1u8);
+    old.extend_from_slice(&21_000u64.to_be_bytes());
+    old.extend_from_slice(&30u64.to_be_bytes());
+    old.extend_from_slice(&[0x55u8; 32]);
+    old.extend_from_slice(&0u32.to_be_bytes());
+    old.push(0u8);
+    old.extend_from_slice(&[0u8; 20]);
+    old.extend_from_slice(&0u32.to_be_bytes());
+    let decoded = ReceiptLike::from_bytes(old.into());
+    assert_eq!(decoded.tx_id, tx_id);
+    assert_eq!(decoded.l1_data_fee, 0);
+    assert_eq!(decoded.operator_fee, 0);
+    assert_eq!(decoded.total_fee, 0);
 }
 
 #[test]

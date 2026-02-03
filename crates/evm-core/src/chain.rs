@@ -2,7 +2,7 @@
 
 use crate::base_fee::compute_next_base_fee;
 use crate::hash;
-use crate::revm_exec::{compute_effective_gas_price, execute_tx, ExecError};
+use crate::revm_exec::{compute_effective_gas_price, execute_tx, BlockExecContext, ExecError};
 use crate::state_root::{
     compute_block_change_hash, compute_state_root_from_changes, empty_tx_change_hash,
 };
@@ -467,6 +467,13 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
     let number = head.number.saturating_add(1);
     let timestamp = head.timestamp.saturating_add(1);
     let parent_hash = head.block_hash;
+    let exec_ctx = with_state(|state| BlockExecContext {
+        block_number: number,
+        timestamp,
+        base_fee: state.chain_state.get().base_fee,
+        l1_params: *state.l1_block_info_params.get(),
+        l1_snapshot: *state.l1_block_info_snapshot.get(),
+    });
 
     let mut included: Vec<TxId> = Vec::new();
     let mut tx_change_hashes: Vec<[u8; 32]> = Vec::new();
@@ -534,7 +541,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         let sender_bytes = address_to_bytes(tx_env.caller);
         let sender_nonce = tx_env.nonce;
         let tx_index = u32::try_from(included.len()).unwrap_or(u32::MAX);
-        let outcome = match execute_tx(tx_id, tx_index, kind, &stored.raw, tx_env, number, timestamp) {
+        let outcome = match execute_tx(tx_id, tx_index, kind, &stored.raw, tx_env, &exec_ctx) {
             Ok(value) => value,
             Err(err) => {
                 if err == ExecError::InvalidGasFee {
@@ -551,6 +558,9 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                     status: 0,
                     gas_used: 0,
                     effective_gas_price: 0,
+                    l1_data_fee: 0,
+                    operator_fee: 0,
+                    total_fee: 0,
                     return_data_hash: hash::keccak256(&output),
                     return_data: output,
                     contract_address: None,
@@ -574,6 +584,9 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         with_state_mut(|state| {
             advance_sender_after_tx(state, tx_id, Some(sender_bytes), Some(sender_nonce))
         });
+        if outcome.l1_fee_fallback_used {
+            record_l1_fee_fallback();
+        }
         block_gas_used = block_gas_used.saturating_add(outcome.receipt.gas_used);
         with_state_mut(|state| {
             state
@@ -766,13 +779,20 @@ fn execute_and_seal_with_caller(
     let number = head.number.saturating_add(1);
     let timestamp = head.timestamp.saturating_add(1);
     let parent_hash = head.block_hash;
+    let exec_ctx = with_state(|state| BlockExecContext {
+        block_number: number,
+        timestamp,
+        base_fee: state.chain_state.get().base_fee,
+        l1_params: *state.l1_block_info_params.get(),
+        l1_snapshot: *state.l1_block_info_snapshot.get(),
+    });
 
     let tx_env = decode_tx(kind, Address::from(caller), &stored.raw)
         .map_err(|_| ChainError::DecodeFailed)?;
     let sender_bytes = address_to_bytes(tx_env.caller);
     let sender_nonce = tx_env.nonce;
 
-    let outcome = match execute_tx(tx_id, 0, kind, &stored.raw, tx_env, number, timestamp) {
+    let outcome = match execute_tx(tx_id, 0, kind, &stored.raw, tx_env, &exec_ctx) {
         Ok(value) => value,
         Err(err) => {
             let sender_key = SenderKey::new(sender_bytes);
@@ -780,6 +800,9 @@ fn execute_and_seal_with_caller(
             return Err(ChainError::ExecFailed(Some(err)));
         }
     };
+    if outcome.l1_fee_fallback_used {
+        record_l1_fee_fallback();
+    }
 
     let tx_list_hash = hash::tx_list_hash(&[tx_id.0]);
     let prev_state_root = load_parent_state_root(head.number);
@@ -1098,6 +1121,23 @@ fn track_drop(total: &mut u64, by_code: &mut [u64], code: u16) {
     let idx = usize::from(code);
     if idx < by_code.len() {
         by_code[idx] = by_code[idx].saturating_add(1);
+    }
+}
+
+fn record_l1_fee_fallback() {
+    let should_warn = with_state_mut(|state| {
+        let mut ops = *state.ops_state.get();
+        ops.l1_fee_fallback_count = ops.l1_fee_fallback_count.saturating_add(1);
+        let now = state.head.get().timestamp;
+        let should_warn = now.saturating_sub(ops.last_l1_fee_warn_ts) >= 60;
+        if should_warn {
+            ops.last_l1_fee_warn_ts = now;
+        }
+        state.ops_state.set(ops);
+        should_warn
+    });
+    if should_warn {
+        eprintln!("l1 fee fallback used: snapshot is disabled");
     }
 }
 

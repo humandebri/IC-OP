@@ -5,14 +5,15 @@ use crate::revm_db::RevmStableDb;
 use crate::tx_decode::DecodeError;
 use evm_db::chain_data::constants::{CHAIN_ID, DEFAULT_BLOCK_GAS_LIMIT};
 use evm_db::chain_data::receipt::LogEntry;
-use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry};
+use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry, TxKind};
 use evm_db::stable_state::{with_state, with_state_mut};
 use ic_stable_structures::Storable;
-use revm::context::{BlockEnv, Context};
-use revm::handler::{ExecuteCommitEvm, ExecuteEvm, MainBuilder};
-use revm::handler::MainnetContext;
-use revm::primitives::{hardfork::SpecId, Address, B256, U256};
+use op_revm::{DefaultOp, OpBuilder, OpContext, OpTransaction};
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use revm::context::{BlockEnv, TxEnv};
 use revm::context_interface::result::ExecutionResult;
+use revm::handler::{ExecuteCommitEvm, ExecuteEvm};
+use revm::primitives::{Address, B256, U256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecError {
@@ -33,6 +34,8 @@ pub struct ExecOutcome {
 pub fn execute_tx(
     tx_id: TxId,
     tx_index: u32,
+    tx_kind: TxKind,
+    raw_tx: &[u8],
     tx_env: revm::context::TxEnv,
     block_number: u64,
     timestamp: u64,
@@ -43,7 +46,7 @@ pub fn execute_tx(
     let effective_gas_price =
         compute_effective_gas_price(max_fee, max_priority, base_fee).ok_or(ExecError::InvalidGasFee)?;
     let db = RevmStableDb;
-    let mut ctx: MainnetContext<RevmStableDb> = Context::new(db, SpecId::CANCUN);
+    let mut ctx: OpContext<RevmStableDb> = OpContext::op().with_db(db);
     let block = BlockEnv {
         number: U256::from(block_number),
         timestamp: U256::from(timestamp),
@@ -52,11 +55,12 @@ pub fn execute_tx(
         ..Default::default()
     };
     ctx.block = block;
-
     ctx.cfg.chain_id = CHAIN_ID;
-    let mut evm = ctx.build_mainnet();
+
+    let op_tx = build_op_transaction(tx_kind, raw_tx, tx_env)?;
+    let mut evm = ctx.build_op();
     let result = evm
-        .transact(tx_env)
+        .transact(op_tx)
         .map_err(|err| ExecError::ExecutionFailed(format!("{:?}", err)))?;
     let state = result.state;
     let state_change_hash = compute_tx_change_hash(&state);
@@ -144,6 +148,40 @@ pub fn execute_tx(
         state_change_hash,
         final_status,
     })
+}
+
+fn build_op_transaction(
+    tx_kind: TxKind,
+    raw_tx: &[u8],
+    tx_env: TxEnv,
+) -> Result<OpTransaction<TxEnv>, ExecError> {
+    let base = TxEnv::builder()
+        .tx_type(Some(tx_env.tx_type))
+        .caller(tx_env.caller)
+        .gas_limit(tx_env.gas_limit)
+        .gas_price(tx_env.gas_price)
+        .kind(tx_env.kind)
+        .value(tx_env.value)
+        .data(tx_env.data)
+        .nonce(tx_env.nonce)
+        .chain_id(tx_env.chain_id)
+        .access_list(tx_env.access_list)
+        .gas_priority_fee(tx_env.gas_priority_fee)
+        .blob_hashes(tx_env.blob_hashes)
+        .max_fee_per_blob_gas(tx_env.max_fee_per_blob_gas)
+        .authorization_list(tx_env.authorization_list);
+
+    if tx_kind == TxKind::OpDeposit || tx_env.tx_type == DEPOSIT_TRANSACTION_TYPE {
+        return Err(ExecError::ExecutionFailed(
+            "op deposit execution path is not wired yet".to_string(),
+        ));
+    }
+
+    OpTransaction::builder()
+        .base(base)
+        .enveloped_tx(Some(raw_tx.to_vec().into()))
+        .build()
+        .map_err(|err| ExecError::ExecutionFailed(format!("{:?}", err)))
 }
 
 fn address_to_bytes(address: revm::primitives::Address) -> [u8; 20] {

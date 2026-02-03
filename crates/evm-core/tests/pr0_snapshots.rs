@@ -61,11 +61,11 @@ fn snapshot_tx_outcome_matrix_and_block_fields() {
 
     assert_eq!(
         matrix,
-        "tx_statuses=[1, 0, 0] final_statuses=[Success, Revert, Halt:InvalidFEOpcode]"
+        "tx_statuses=[1, 0, 0] final_statuses=[Success, Revert, Halt:Base(InvalidFEOpcode)]"
     );
     assert_eq!(
         block_outcome,
-        "number=3 block_hash=2a5350cda7cbd4979c99e391ae7303eb606a0ad7b2190d836b80006a527eda35 tx_list_hash=4ad087ec0641a22f03bb82cb8cf391aca8c73cb30fd8eeda10b813d1f2a6c6df state_root=d570ddc14bfde8d46ce2582654c9fb862ad23e0608ee3c3225cdbe66fe7d20c4"
+        "number=3 block_hash=6c2aa373072a8428fc3f3e6ec7c2d16f1bbf314e3801167d49ff168a7bafcc19 tx_list_hash=4ad087ec0641a22f03bb82cb8cf391aca8c73cb30fd8eeda10b813d1f2a6c6df state_root=a3db5fce7068f75e0787c28737ea17cd4e1bd4f8052b9f581bef62bb6f333143"
     );
 }
 

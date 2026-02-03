@@ -534,7 +534,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         let sender_bytes = address_to_bytes(tx_env.caller);
         let sender_nonce = tx_env.nonce;
         let tx_index = u32::try_from(included.len()).unwrap_or(u32::MAX);
-        let outcome = match execute_tx(tx_id, tx_index, tx_env, number, timestamp) {
+        let outcome = match execute_tx(tx_id, tx_index, kind, &stored.raw, tx_env, number, timestamp) {
             Ok(value) => value,
             Err(err) => {
                 if err == ExecError::InvalidGasFee {
@@ -772,7 +772,7 @@ fn execute_and_seal_with_caller(
     let sender_bytes = address_to_bytes(tx_env.caller);
     let sender_nonce = tx_env.nonce;
 
-    let outcome = match execute_tx(tx_id, 0, tx_env, number, timestamp) {
+    let outcome = match execute_tx(tx_id, 0, kind, &stored.raw, tx_env, number, timestamp) {
         Ok(value) => value,
         Err(err) => {
             let sender_key = SenderKey::new(sender_bytes);

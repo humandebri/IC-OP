@@ -71,21 +71,6 @@
 - `crates/evm-core/src/revm_db.rs`
 - `crates/evm-core/Cargo.toml`
 
-
-PR4: Base Fee（EIP-1559）を alloy の標準計算へ
-
-やること
-
-evm-core/src/base_fee.rs の compute_next_base_fee を置換
-
-alloy_eips::eip1559 の計算関数へ委譲
-
-自前定数（elasticity等）を削除して、参照元に寄せる
-
-完了条件
-
-ベースフィー遷移が参照実装と一致（テストで担保）
-
 ## PR5: state root標準化（最優先）
 
 - [ ] 独自 `leaf_hash` / `compute_state_root_from_changes` 依存を廃止
@@ -100,9 +85,21 @@ alloy_eips::eip1559 の計算関数へ委譲
 
 ## PR4: base fee標準化
 
-- [ ] 独自 `compute_next_base_fee` をalloy EIP-1559計算へ置換
+- [ ] **必須（PR4本体）**
+- [ ] `compute_next_base_fee` を alloy EIP-1559計算へ置換
 - [ ] 自前定数依存を削減し参照元準拠に統一
-- [ ] ベースフィー遷移の参照実装一致テストを追加
+- [ ] `phase1_fee_rules` へベースフィー遷移の参照実装一致テストを追加
+- [ ] **同梱ガード（推奨）**
+- [ ] `pr0_snapshots` 差分理由（system tx skip由来）をドキュメント化
+- [ ] system tx 不算入（receipt/index/gas/fee/tx件数）を共通アサートで固定
+- [ ] `spec_id` 分岐漏れ防止テスト（境界 + 全match）を追加
+- [ ] disabledスキップ時の観測性（メトリクス優先、ログ抑制）を維持
+- [ ] **受け入れ条件（PR4 Done）**
+- [ ] base fee遷移が参照実装と一致
+- [ ] `pr0_snapshots` の差分が「意図差分」として説明可能
+- [ ] system txがユーザー会計へ混入しないことをテストで保証
+- [ ] `spec_id` 境界（pre/post）および未対応追加時の検知導線がある
+- [ ] disabledスキップを観測できる
 
 対象ファイル（主）:
 - `crates/evm-core/src/base_fee.rs`

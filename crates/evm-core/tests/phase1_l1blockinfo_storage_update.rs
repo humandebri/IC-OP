@@ -18,6 +18,7 @@ fn enabled_snapshot_updates_l1_storage_v1_layout() {
 
     let slot1 = read_storage_word(1);
     assert_eq!(slot1, U256::from(777u64));
+    assert_user_accounting_is_not_polluted();
 }
 
 #[test]
@@ -29,6 +30,7 @@ fn enabled_snapshot_updates_l1_storage_v2_layout() {
 
     let slot2 = read_storage_word(2);
     assert_eq!(slot2, U256::from(888u64));
+    assert_user_accounting_is_not_polluted();
 }
 
 #[test]
@@ -40,6 +42,7 @@ fn disabled_snapshot_skips_l1_storage_update() {
 
     assert_eq!(read_storage_word(1), U256::ZERO);
     assert_eq!(read_storage_word(2), U256::ZERO);
+    assert_user_accounting_is_not_polluted();
 }
 
 fn configure_l1(spec_id: u8, enabled: bool, l1_base_fee: u128, l1_blob_base_fee: u128) {
@@ -71,6 +74,12 @@ fn run_single_user_tx(tag: u8) {
     let target = [tag; 20];
     install_user_stop_contract(target);
     chain::execute_ic_tx(caller_principal, vec![0xaa], build_ic_tx_bytes(target)).expect("execute");
+}
+
+fn assert_user_accounting_is_not_polluted() {
+    let (receipt_count, tx_index_count) = with_state(|state| (state.receipts.len(), state.tx_index.len()));
+    assert_eq!(receipt_count, 1);
+    assert_eq!(tx_index_count, 1);
 }
 
 fn install_user_stop_contract(address: [u8; 20]) {

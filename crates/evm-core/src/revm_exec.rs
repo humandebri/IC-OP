@@ -559,6 +559,44 @@ mod tests {
     #[test]
     fn invalid_spec_id_is_rejected() {
         assert_eq!(op_spec_id_from_u8(99), Err(99));
+        assert_eq!(op_spec_id_from_u8(111), Err(111));
+    }
+
+    #[test]
+    fn all_supported_spec_ids_are_mapped() {
+        for value in 100u8..=110u8 {
+            assert!(op_spec_id_from_u8(value).is_ok(), "spec_id={value}");
+        }
+    }
+
+    #[test]
+    fn l1_block_info_call_data_switches_at_ecotone_boundary() {
+        let ctx = BlockExecContext {
+            block_number: 11,
+            timestamp: 22,
+            base_fee: 33,
+            l1_params: L1BlockInfoParamsV1 {
+                schema_version: 1,
+                spec_id: 102,
+                empty_ecotone_scalars: false,
+                l1_fee_overhead: 44,
+                l1_base_fee_scalar: 55,
+                l1_blob_base_fee_scalar: 66,
+                operator_fee_scalar: 0,
+                operator_fee_constant: 0,
+            },
+            l1_snapshot: L1BlockInfoSnapshotV1 {
+                schema_version: 1,
+                enabled: true,
+                l2_block_number: 66,
+                l1_base_fee: 77,
+                l1_blob_base_fee: 88,
+            },
+        };
+        let pre = build_l1blockinfo_calldata(OpSpecId::CANYON, &ctx).expect("pre-ecotone");
+        let post = build_l1blockinfo_calldata(OpSpecId::ECOTONE, &ctx).expect("post-ecotone");
+        assert_eq!(pre.len(), 4 + 8 * 32);
+        assert_eq!(post.len(), 4 + 9 * 32);
     }
 
     #[test]

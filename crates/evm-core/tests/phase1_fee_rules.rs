@@ -1,5 +1,7 @@
 //! どこで: Phase1.3テスト / 何を: fee境界とbase_fee再評価 / なぜ: 有効手数料と順序の決定性を保証するため
 
+use alloy_eips::eip1559::{calc_next_block_base_fee, BaseFeeParams};
+use evm_core::base_fee::compute_next_base_fee;
 use evm_core::chain::{self, ChainError};
 use evm_db::chain_data::constants::DROP_CODE_INVALID_FEE;
 use evm_db::chain_data::TxLocKind;
@@ -97,6 +99,30 @@ fn equal_fee_uses_seq_order() {
     assert_eq!(block.tx_ids.len(), 2);
     assert_eq!(block.tx_ids[0], a_id);
     assert_eq!(block.tx_ids[1], b_id);
+}
+
+#[test]
+fn base_fee_matches_alloy_reference_vectors() {
+    let base_fee = [
+        1_000_000_000u64,
+        1_000_000_000,
+        1_072_671_875,
+        1_049_238_967,
+        0,
+        1,
+    ];
+    let gas_used = [10_000_000u64, 9_000_000, 9_000_000, 0, 10_000_000, 10_000_000];
+    let gas_limit = [10_000_000u64, 10_000_000, 10_000_000, 2_000_000, 18_000_000, 18_000_000];
+    for idx in 0..base_fee.len() {
+        let expected = calc_next_block_base_fee(
+            gas_used[idx],
+            gas_limit[idx],
+            base_fee[idx],
+            BaseFeeParams::ethereum(),
+        );
+        let actual = compute_next_base_fee(base_fee[idx], gas_used[idx], gas_limit[idx]);
+        assert_eq!(actual, expected, "vector idx={idx}");
+    }
 }
 
 fn build_ic_tx_bytes(max_fee: u128, max_priority: u128, nonce: u64) -> Vec<u8> {

@@ -203,7 +203,7 @@ type SubmitTxError = variant {
   Rejected : text;
   InvalidArgument : text;
 };
-type TxKindView = variant { EthSigned; IcSynthetic };
+type TxKindView = variant { EthSigned; IcSynthetic; OpDeposit };
 service : () -> {
   execute_eth_raw_tx : (blob) -> (Result);
   execute_ic_tx : (blob) -> (Result);

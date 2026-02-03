@@ -105,6 +105,7 @@ pub fn decode_tx(kind: TxKind, caller: RevmAddress, bytes: &[u8]) -> Result<TxEn
     match kind {
         TxKind::IcSynthetic => decode_ic_synthetic(caller, bytes),
         TxKind::EthSigned => decode_eth_raw_tx(bytes),
+        TxKind::OpDeposit => Err(DecodeError::UnsupportedType),
     }
 }
 
@@ -162,6 +163,7 @@ pub fn decode_tx_view(
                 chain_id: tx_env.chain_id,
             })
         }
+        TxKind::OpDeposit => Err(DecodeError::UnsupportedType),
     }
 }
 

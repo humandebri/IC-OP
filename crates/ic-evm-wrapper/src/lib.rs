@@ -5,7 +5,7 @@ use ic_cdk::api::{canister_cycle_balance, debug_print, is_controller, msg_caller
 use evm_db::chain_data::constants::MAX_RETURN_DATA;
 use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::{
-    BlockData, OpsConfigV1, OpsMode, RawTx, ReceiptLike, StoredTx, StoredTxBytes,
+    BlockData, OpsConfigV1, OpsMode, ReceiptLike, StoredTx, StoredTxBytes,
     TxId, TxKind, TxLoc, TxLocKind,
 };
 use evm_db::meta::{current_schema_version, ensure_meta_initialized, get_meta, mark_migration_applied};
@@ -285,6 +285,7 @@ pub enum PendingStatusView {
 pub enum TxKindView {
     EthSigned,
     IcSynthetic,
+    OpDeposit,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -1041,6 +1042,7 @@ fn tx_kind_to_view(kind: TxKind) -> TxKindView {
     match kind {
         TxKind::EthSigned => TxKindView::EthSigned,
         TxKind::IcSynthetic => TxKindView::IcSynthetic,
+        TxKind::OpDeposit => TxKindView::OpDeposit,
     }
 }
 
@@ -1131,10 +1133,10 @@ fn envelope_to_eth_view(
     let kind = stored.kind;
     let caller = match kind {
         TxKind::IcSynthetic => stored.caller_evm.unwrap_or([0u8; 20]),
-        TxKind::EthSigned => [0u8; 20],
+        TxKind::EthSigned | TxKind::OpDeposit => [0u8; 20],
     };
     let decoded = if let Ok(decoded) =
-        evm_core::tx_decode::decode_tx_view(kind, caller, raw_bytes(&stored.raw))
+        evm_core::tx_decode::decode_tx_view(kind, caller, &stored.raw)
     {
         Some(DecodedTxView {
             from: decoded.from.to_vec(),
@@ -1153,23 +1155,17 @@ fn envelope_to_eth_view(
     Some(EthTxView {
         hash: stored.tx_id.0.to_vec(),
         eth_tx_hash: if kind == TxKind::EthSigned {
-            Some(hash::keccak256(raw_bytes(&stored.raw)).to_vec())
+            Some(hash::keccak256(&stored.raw).to_vec())
         } else {
             None
         },
         kind: tx_kind_to_view(kind),
-        raw: raw_bytes(&stored.raw).clone(),
+        raw: stored.raw.clone(),
         decode_ok: decoded.is_some(),
         decoded,
         block_number,
         tx_index,
     })
-}
-
-fn raw_bytes(raw: &RawTx) -> &Vec<u8> {
-    match raw {
-        RawTx::Eth2718(bytes) | RawTx::IcSynthetic(bytes) => bytes,
-    }
 }
 
 fn receipt_to_eth_view(receipt: ReceiptLike) -> EthReceiptView {

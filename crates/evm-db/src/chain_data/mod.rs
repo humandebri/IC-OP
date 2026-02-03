@@ -29,4 +29,4 @@ pub use prune_state::{PruneJournal, PruneStateV1};
 pub use queue::QueueMeta;
 pub use receipt::ReceiptLike;
 pub use tx_loc::{TxLoc, TxLocKind};
-pub use tx::{FeeFields, RawTx, StoredTx, StoredTxBytes, StoredTxError, StoredTxBytesError, TxId, TxIndexEntry, TxKind};
+pub use tx::{StoredTx, StoredTxBytes, StoredTxBytesError, StoredTxError, TxId, TxIndexEntry, TxKind};

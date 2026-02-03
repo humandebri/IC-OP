@@ -13,7 +13,7 @@ use evm_db::chain_data::constants::{
     DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE, READY_CANDIDATE_LIMIT,
 };
 use evm_db::chain_data::{
-    BlockData, Head, PruneJournal, PrunePolicy, RawTx, ReceiptLike, ReadyKey, SenderKey,
+    BlockData, Head, PruneJournal, PrunePolicy, ReceiptLike, ReadyKey, SenderKey,
     SenderNonceKey, StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use evm_db::memory::VMem;
@@ -520,9 +520,9 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                     continue;
                 }
             },
-            TxKind::EthSigned => [0u8; 20],
+            TxKind::EthSigned | TxKind::OpDeposit => [0u8; 20],
         };
-        let tx_env = match decode_tx(kind, Address::from(caller), raw_bytes(&stored.raw)) {
+        let tx_env = match decode_tx(kind, Address::from(caller), &stored.raw) {
             Ok(value) => value,
             Err(_) => {
                 with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
@@ -767,7 +767,7 @@ fn execute_and_seal_with_caller(
     let timestamp = head.timestamp.saturating_add(1);
     let parent_hash = head.block_hash;
 
-    let tx_env = decode_tx(kind, Address::from(caller), raw_bytes(&stored.raw))
+    let tx_env = decode_tx(kind, Address::from(caller), &stored.raw)
         .map_err(|_| ChainError::DecodeFailed)?;
     let sender_bytes = address_to_bytes(tx_env.caller);
     let sender_nonce = tx_env.nonce;
@@ -1291,9 +1291,9 @@ fn load_fee_fields_and_seq(
     };
     let stored = StoredTx::try_from(envelope).map_err(|_| RekeyError::DecodeFailed)?;
     let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee) = (
-        stored.fee.max_fee_per_gas,
-        stored.fee.max_priority_fee_per_gas,
-        stored.fee.is_dynamic_fee,
+        stored.max_fee_per_gas,
+        stored.max_priority_fee_per_gas,
+        stored.is_dynamic_fee,
     );
     let chain_state = state.chain_state.get();
     let base_fee = chain_state.base_fee;
@@ -1322,12 +1322,6 @@ fn address_to_bytes(address: Address) -> [u8; 20] {
     out
 }
 
-
-fn raw_bytes(raw: &RawTx) -> &Vec<u8> {
-    match raw {
-        RawTx::Eth2718(bytes) | RawTx::IcSynthetic(bytes) => bytes,
-    }
-}
 
 fn apply_nonce_and_replacement(
     state: &mut evm_db::stable_state::StableState,

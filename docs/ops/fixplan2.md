@@ -26,9 +26,9 @@
 ## PR1: Tx表現の統一（TxIn導入）
 
 - [x] `Eth/OpDeposit/IcSynthetic` の統一入口型（例: `TxIn`）を導入
-- [ ] `StoredTx/RawTx/FeeFields` を再設計し、独自型乱立を削減
+- [x] `StoredTx/RawTx/FeeFields` を再設計し、独自型乱立を削減
 - [x] submit/executeの入口を `TxIn` に統一
-- [ ] 永続化形式はversioned encoding前提で更新
+- [x] 永続化形式はversioned encoding前提で更新
 
 対象ファイル（主）:
 - `crates/evm-db/src/chain_data/tx.rs`

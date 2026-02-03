@@ -14,6 +14,7 @@ path = "src/test_bin/caller_evm.rs"
 [[bin]]
 name = "eth_raw_tx"
 path = "src/test_bin/eth_raw_tx.rs"
+required-features = ["local-signer-bin"]
 
 [dependencies]
 tiny-keccak = { version = "2", features = ["keccak"] }
@@ -23,8 +24,8 @@ alloy-rlp = "0.3"
 alloy-primitives = { version = "1.5.2", default-features = false, features = ["std", "rlp"] }
 alloy-eips = { version = "1.5.2", default-features = false, features = ["std", "k256"] }
 alloy-consensus = { version = "1.5.2", default-features = false, features = ["std", "k256"] }
-alloy-signer = { version = "1.5.2", default-features = false }
-alloy-signer-local = { version = "1.5.2", default-features = false }
+alloy-signer = { version = "1.5.2", default-features = false, optional = true }
+alloy-signer-local = { version = "1.5.2", default-features = false, optional = true }
 
 [dependencies.evm_db]
 package = "evm-db"
@@ -32,3 +33,4 @@ path = "../evm-db"
 
 [features]
 full_state_root = []
+local-signer-bin = ["dep:alloy-signer", "dep:alloy-signer-local"]

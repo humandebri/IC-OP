@@ -21,6 +21,11 @@ fi
 
 dfx start --clean --background
 
+echo "[guard] rng callsite check"
+scripts/check_rng_paths.sh
+echo "[guard] wasm getrandom feature check"
+scripts/check_getrandom_wasm_features.sh
+
 cargo test -p evm-db -p ic-evm-core -p ic-evm-wrapper
 
 dfx canister create evm_canister

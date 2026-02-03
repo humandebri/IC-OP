@@ -1,258 +1,192 @@
-ご提示いただいたソースコード、設定、およびドキュメントに基づき、シニアセキュリティ＆信頼性レビューアとして監査を行います。
-
-本プロジェクトは、Rust実装のEVM（revm）をInternet Computer（IC）のStable Memory上で動作させるL2/サイドチェーンソリューションのPoC（Proof of Concept）フェーズの実装と見受けられます。
-
-以下に監査結果を報告します。
-
-### 1) Executive Summary
-本プロジェクトは、ic-stable-structuresを活用し、EVMの状態を永続メモリ（Stable Memory）に直接マッピングする意欲的な設計です。しかし、**ブロック生成およびステートルート計算において、データ量に比例して処理時間が増大するO(N)の操作が含まれており、実運用レベルのデータ量（数千アカウント/数万トランザクション）に達するとInstruction Limitに抵触し、システムが停止（Trap）する「計算量的な時限爆弾」を抱えています。** また、データのデシリアライズ処理（Storable::from_bytes）でtrap（強制終了）を多用しており、万が一データ破損やバグで不正なデータが書き込まれた場合、キャニスターがリカバリ不能になるリスクが高い設計です。これらはPhase 1（実行基盤）としても重大なブロッカーです。
-
----
-
-### 2) 重大指摘（Critical/High）
-
-#### 1. 全状態走査によるState Root計算（DoS/スケーラビリティ欠陥）
-*   **Severity:** **Critical** / **Confidence:** High
-*   **File:** /crates/evm-core/src/state_root.rs
-*   **Evidence:**
-    
-rust
-    pub fn compute_state_root_with(state: &StableState) -> [u8; 32] {
-        let mut acc = Vec::new();
-        for entry in state.accounts.iter() {
-    // ... (accounts, storage, codes を全てイテレート)
-
-*   **Impact:** produce_blockのたびに、保存されている**全て**のアカウント、ストレージスロット、コードを読み出してハッシュ計算しています。ICの1メッセージあたりの命令数制限（Instruction Limit）により、ステートサイズがある閾値を超えた瞬間、ブロック生成が永久にTrapし、チェーンが停止します。
-*   **Fix:**
-    *   Merkle Patricia Trie (MPT) または Verkle Tree を実装し、変更があった部分のみハッシュを再計算する構造にする。
-    *   PoC段階で厳密さが不要なら、一時的にステート全体のハッシュ計算を無効化し、トランザクションリストのハッシュのみをブロックに含める。
-
-#### 2. Mempool再計算時の全件ロード（DoS/スケーラビリティ欠陥）
-*   **Severity:** **Critical** / **Confidence:** High
-*   **File:** /crates/evm-core/src/chain.rs
-*   **Evidence:**
-    
-rust
-    fn rekey_ready_queue_with_drop(...) {
-        let mut keys: Vec<ReadyKey> = Vec::new();
-        for entry in state.ready_queue.range(..) { // 全件取得
-            keys.push(*entry.key());
-        }
-    // ... その後、全件に対して個別にgetして処理
-
-*   **Impact:** base_feeが変動するたびに実行されるこの処理は、Mempool（ready_queue）内の全トランザクションをヒープにロードし、再評価しています。Pendingトランザクションが増加すると、produce_blockがタイムアウト（Limit Exceeded）し、新しいブロックが生成できなくなります。
-*   **Fix:**
-    *   全件走査を避け、先頭からmax_txs分だけ評価する、あるいはインデックス構造を見直して影響を受けるTxのみを再計算するロジックに変更する。
-
-#### 3. Storable::from_bytes 内での Trap 多用（リカバリ不能リスク）
-*   **Severity:** **High** / **Confidence:** High
-*   **File:** /crates/evm-db/src/chain_data/receipt.rs (他、block.rs, tx.rs等多数)
-*   **Evidence:**
-    
-rust
-    if data.len() > RECEIPT_MAX_SIZE_U32 as usize {
-        ic_cdk::trap("receipt: invalid length");
-    }
-    // ...
-    ic_cdk::trap("receipt: invalid return_data length");
+Phase 0: 緊急止血（当日〜即時パッチ）
 
-*   **Impact:** ic-stable-structuresのfrom_bytesはデータ読み出し時に呼ばれます。ここでtrapすると、そのデータ構造へのアクセス手段が完全に失われます（読み出そうとすると必ず落ちる）。バグやアップグレード時の仕様変更で不整合なデータが一つでも混入すると、マイグレーションすらできなくなります。
-*   **Fix:**
-    *   from_bytes内では絶対にtrapせず、デフォルト値やOption型でのラップ、あるいは「壊れたデータ」を示す特殊なEnumバリアントを返すように設計を変更する。データの整合性チェックは書き込み時（to_bytes前）に厳格に行う。
+目的：第三者に止められない状態にする（Critical潰し）
 
----
+0.1 管理系 update の認可を完全に統一
 
-### 3) 中〜軽微指摘（Medium/Low）
+対象（例）
 
-#### 4. Wasmターゲットでの乱数生成失敗（機能不全）
-*   **Severity:** Medium
-*   **File:** /crates/ic-evm-wrapper/src/lib.rs
-*   **Evidence:**
-    
-rust
-    #[cfg(target_arch = "wasm32")]
-    fn always_fail_getrandom(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
-        Err(getrandom::Error::UNSUPPORTED)
-    }
+set_auto_mine
 
-*   **Impact:** 依存クレート（alloy-signer, k256 等）が内部で乱数を必要とするコードパスを通った場合、実行時エラーとなります。署名の検証（recover）だけであれば乱数は不要な場合が多いですが、鍵生成や一部の署名処理が含まれるとパニックします。
-*   **Fix:** ICのManagement Canisterのraw_randをシードとするPRNGを実装するか、乱数を必要とする依存機能をfeature flag等で無効化する。
+set_mining_interval_ms
 
-#### 5. Principal長のハードコード制限（将来的な互換性）
-*   **Severity:** Low
-*   **File:** /crates/evm-db/src/chain_data/caller.rs
-*   **Evidence:** if bytes.len() > MAX_PRINCIPAL_LEN { ic_cdk::trap(...) } (29 bytes)
-*   **Impact:** 現在のIC仕様ではPrincipalは最大29バイトですが、内部仕様では可変長であり、将来的に拡張された場合にこのキャニスターはそれらのPrincipalを受け付けられなくなります。
-*   **Fix:** 固定長配列ではなく、可変長（Blob等）として扱うか、ハッシュ化して固定長IDとして管理する（EVMアドレス生成時と同様のアプローチ）。
+set_prune_policy
 
-#### 6. 重いQueryコールのリスク（Export API）
-*   **Severity:** Medium
-*   **File:** /crates/evm-core/src/export.rs
-*   **Evidence:** export_blocks関数は max_bytes で制限をかけていますが、内部で state.blob_store.read を繰り返します。
-*   **Impact:** BlobStoreの読み出しはStable Memoryへのアクセスを伴うため、大量のブロックを一括エクスポートしようとするとQueryの命令数制限に引っかかる可能性があります。
-*   **Fix:** ページネーションの単位をバイト数だけでなく、ブロック数でも厳格に制限する（例: 最大100ブロックまで）。
+set_pruning_enabled
 
----
+（追加で）set_ops_config 等、運用設定を変えるもの全部
 
-### 4) アーキテクチャ不変条件と現状の破りポイント
+実装
 
-| 守るべきルール（Invariant） | 現状の違反（Violation） |
-| :--- | :--- |
-| **O(1) / O(log N) Execution** <br> ブロック生成コストは総データ量に依存してはならない。 | **違反 (Critical):** compute_state_root が全アカウント・全ストレージを走査している。rekey が全Mempoolを走査している。 |
-| **Recoverability** <br> 永続データに不正なバイト列があっても、読み出し処理でCanisterを殺してはならない。 | **違反 (High):** from_bytes 実装の至る所で ic_cdk::trap が埋め込まれている。 |
-| **Stable Memory Safety** <br> メモリ領域（MemoryId）の重複使用や未初期化アクセスがあってはならない。 | **順守:** MemoryManager と AppMemoryId enum (Source 140) により、ID管理は体系的に行われている。ここは良好。 |
-| **Determinism** <br> 同じ入力からは必ず同じ結果（Block/State）が得られなければならない。 | **順守:** OverlayMap (Source 36) でBTreeMapを使用し、Commit順序をキー昇順に固定している点は評価できる。 |
+ic-evm-wrapper/src/lib.rs に fn ensure_controller() を追加し、管理系update全て冒頭で呼ぶ
 
----
+可能なら #[update(guard = "ensure_controller_guard")] 型に統一（漏れ防止）
 
-### 5) 修正の優先順ロードマップ
+受け入れ条件（AC）
 
-リスクを最小化し、システムを稼働可能な状態にするための手順です。
+controller以外が呼ぶと必ず unauthorized でtrap
 
-1.  **【最優先】State Root計算のダミー化または差分計算化**
-    *   現状の全件走査実装を削除し、一旦は「トランザクションハッシュのハッシュ」等をState Rootとして代用するか、変更セット（Overlay）のみからハッシュを計算する簡易実装に切り替える。これをしないと、データが増えた瞬間に死にます。
+監査観点で「管理系API一覧」が列挙できる状態（README or doc）
 
-2.  **【優先】Mempool Rekeyロジックの修正**
-    *   rekey_ready_queue_with_drop での全件ループを廃止する。ready_queue の構造を見直し、再計算が必要なTxのみを処理するか、処理数に上限を設ける。
+Phase 1: 永続肥大化の根絶（High）
 
-3.  **【重要】Storable 実装の trap 除去**
-    *   from_bytes 内の ic_cdk::trap を panic! に変えるのではなく、データの不整合を検知してもデフォルト値を返すか、エラーログを出して処理を継続できる（あるいはそのエントリを無視できる）構造にする。
+目的：“ブロックに乗らない/失敗するTxが永遠に残る” を止める
 
-4.  **【推奨】RNGのスタブ化解除**
-    *   evm-rpc-e2e 等のテストだけでなく、本番ビルドでも getrandom がエラーにならないよう、IC環境向けのRNGシムを導入する。
+1.1 Dropped Tx の “墓標設計” か “即時削除” を選ぶ
 
-### 6) 追加で必要な情報（要求事項）
+即削除で
 
-1.  **依存クレート revm のバージョンとパッチ詳細**
-    *   Cargo.toml に path = "../../vendor/revm" とあるが、オリジナルの revm に対してどのような変更を加えているか（特に no_std 対応やIC固有の変更）の情報が必要です。
-2.  **Cycle ガバナンス設定**
-    *   produce_block は誰が呼び出すのか？ タイマー(ic-cdk-timers)で自動化されているようだが、Cycle枯渇時の挙動や、Canisterの凍結防止策（Cycle Threshold等）の設定ファイルまたはコードが見当たりません。
-3.  **Upgrade時のデータ移行計画**
-    *   Meta 構造体でバージョン管理しているが、実際にレイアウト変更が必要になった際のマイグレーションロジック（V1 -> V2変換コード）が現状存在しないため、将来の拡張計画が必要です。
+実装方針（即時削除）
 
-監査したらこんな感じでした・・・
-思考時間: 34s
+evm-core/src/chain.rs（produce_block / select_ready_candidates 等、drop判定が起きる箇所）で drop判定した瞬間に 次を行う：
 
-この監査メモ、かなり筋がいいです。特に **「IC上で死ぬ典型パターン」**をちゃんと踏んで指摘してる。
+本文削除（重いデータを消す）
 
-ただし前提を1個だけハッキリさせると、これは「セキュリティ監査」というより **“計算量・復旧性・運用性の信頼性監査”**で、PoCでも刺さるブロッカーが混ざってます。
+state.tx_store.remove(txid)
 
-以下、俺の評価（同意/補足/反論できる所）と、今やるべき実装タスクに落とします。
+Tx本文（RawTx / Envelope / Blob等、サイズが大きいもの）を削除
 
-まず結論：Critical 3点は「放置すると確実に死ぬ」系
-1) State root が全走査（Critical）
+もし本文が BlobStore 側にもあるなら、対応するポインタもここで削除対象に含める（実装の実態に合わせる）
 
-これは 本当にヤバい。ICは「メッセージ内の命令数・時間」に上限があるので、状態が育った時点で produce_block が永久に落ちるタイプの時限爆弾になる。
+Dropped状態を記録（軽量メタだけ）
 
-監査メモの通り、accounts/storage/codes を全部イテレートしてるならアウト。
+state.tx_locs.insert(txid, TxLoc::Dropped { reason, ts })
 
-“Merkle/Verkleを実装しろ”は正論だけど重い。Phase1の現実解は次。
+reason: drop理由コード（decode error / insufficient gas / fee too low / nonce window 逸脱 等）
 
-Phase1の実装案（現実路線）
+ts: ic0::time() で良い（観測用途。不要なら省略してもいいが、あるとデバッグが楽）
 
-state_root を 厳密MPT互換としては扱わない（Phase2以降に先送り）。
+関連インデックスを必ず削除（最重要）
+Tx本文を消しても、インデックスが残ると「幽霊Tx」が発生して整合性が崩れるので、drop時に必ず掃除する。
 
-代わりに「決定的で、差分だけで更新できる root」を入れる。
+txid -> key/meta（例：seen_tx, tx_index, txid_to_queue_key など）
 
-例：state_root = keccak(prev_state_root || block_number || tx_list_hash || overlay_change_hash)
+pending_by_sender_nonce から該当エントリ（drop判定の段階が pending/ready どこかにより分岐）
 
-overlay_change_hash は commit 対象の (key,value) をキー順にハッシュ連結して作る（OverlayMapならやりやすい）
+ready_queue から該当エントリ
 
-これで O(changes) にできる。
+sender/nonce の補助インデックスがあるならそれも
 
-これをやらない限り、どれだけ pruning/indexer を整備しても本体が育つと止まる。
+要するに「このtxidを辿る全ルートを断つ」。削除対象を1箇所に集約するのが事故を減らす。
 
-2) base_fee変動で ready_queue 全件 rekey（Critical）
+1.2 Pending/Queue の “無限滞留” をTTLか容量制限で止める
 
-これも 設計として破綻しやすい。EIP-1559絡みで ordering を “正確に”やろうとすると、base_fee が動くたびに effective_gas_price が変わる＝並び替えたくなる、になりがち。でも全件 rekey は IC だと死ぬ。
+最初は実装が軽い 容量制限（cap） を先に入れて止血、そのあと TTL。
 
-現実解（どれかに割り切る）
+容量制限（先に入れる）
 
-A案：キーを base_fee 非依存にする
+Global cap（全体の pending/ready 合計）
 
-ReadyKey を (max_fee_per_gas, max_priority_fee_per_gas, seq) みたいに固定しておいて
+Per-sender cap（送信者ごとの pending数）
 
-produce_block で 先頭から最大K件だけ取り出して “その時点の base_fee で effective を計算して選ぶ”
+cap超過時は Rejected（または evictionポリシーで古い/低feeを落とす）
 
-“厳密な mempool 並び”ではないが、ICで動く。
+AC
 
-B案：rekeyを分割実行（tick化）
+任意のユーザーが無限に tx を溜められない
 
-rekeyを1回で全件やらず、max_ops_per_tick で少しずつ進める
+Phase 2: IC特有のDoS耐性（High〜Medium）
 
-ただし ordering の一貫性が微妙になるので、決定性の設計が必要
+目的：“無料で殴られて運営がサイクル/命令数を払う” 非対称を縮める
 
-C案：Phase1は FIFO に戻す
+2.1 inspect_message による軽量フィルタ（最優先の防波堤）
 
-これはあなたが「FIFOに戻らない」方針だったので、多分採らないと思う
+やりすぎ注意。重い署名検証はここに入れないのが基本。
 
-監査の「全件走査をやめろ」は正しくて、どの割り切りを選ぶかの問題。
+canister_inspect_message でやること（軽量のみ）
 
-3) Storable::from_bytes に trap 多用（High）
+メソッド名チェック（管理系はここで即rejectでも良い）
 
-これもその通りで、壊れた1レコードで canister が半永久的に死ぬパターン。
+payload size / tx size（上限）
 
-ただしここは Rust 的に厄介で、Storable::from_bytes が Result を返せない設計なので、きれいに直すには方針が要る。
+形式的に壊れている入力（デコード前段で弾ける範囲）
 
-Phase1の現実解
+署名検証・残高検証は原則 submit / produce_block 側へ（段階的に前倒し）
 
-from_bytes では trap しない
+2.2 Nonce window（未来Nonceの無限投入を抑止）
 
-不正バイト列は “破損レコード”として丸める
+submit_tx 時点で
 
-例：Receipt { status: 0, gas_used: 0, return_data: empty, logs: empty, corrupted: true }
+current_nonce から current_nonce + WINDOW 以内のみ受理（例：+64）
 
-そして API 返却時に corrupted を見て、必要なら “DecodeError” 的に扱う（ただし trap はしない）
+AC
 
-もう一段安全にするなら、
+未来Nonceを何万個も積まれて永続化されない
 
-Stableには「長さ＋生bytes」だけを置き
+2.3 TTL eviction（Gethライク）
 
-decode は export/query 側で Result で行う（壊れてても読み出しはできる）
+evm-db に (timestamp, txid) 索引（BTree）を追加
 
-監査の “trap禁止” はガチで重要。ここは「セキュリティ」じゃなく リカバリ不能性が問題。
+定期タスク（timer/heartbeat）で cutoff より古い pending を順に削除
 
-Medium 指摘は「当たってるが優先度は落ちる」
-RNGスタブ（wasm getrandom unsupported）
+AC
 
-これは「署名を“生成”する経路が入ったら死ぬ」。
-あなたの用途が “検証/リカバーのみ”なら当面は致命傷じゃないが、依存がいつどこで rand を踏むかが怖い。
+“時間が経てば勝手に掃除される” が成立
 
-最小対策
+Phase 3: 状態整合性と障害復旧（Medium）
 
-alloy-signer* など “署名生成”に関わる経路を canister 側から排除（featureで切る）
+目的：“索引ズレ/再起動/upgradeで壊れない” を固める
 
-どうしても必要なら raw_rand（updateでのみ可）で PRNG を作る
+3.1 不変条件（Invariant）をコード化（デバッグ/テスト）
 
-Export API の重さ
+例
 
-あなたはすでに Chunk + max_bytes + cursor に寄せてるので方向性は良い。
-追加するなら “ブロック数上限（max_blocks）” を入れるのは保険になる。
+pending_by_sender_nonce にあるtxidは必ず tx_locs か tx_store のどちらかに存在
 
-じゃあ「次に何するべきか」：実装タスクに落とす
+Dropped墓標の txid は pending/ready に存在しない
 
-監査メモを踏まえるなら、次の順番が最短で堅いです。
+実装
 
-Task 1（最優先）: state_root を O(changes) に置き換え
+debug_assert_invariants()（feature gate でもOK）
 
-既存の全走査 root 計算は 消す or デバッグ用途に隔離
+プロパティテスト（PBT）でランダム操作列から検証
 
-overlay の変更セットから決定的 hash を作る（キー順）
+3.2 upgrade時の挙動を明文化
 
-Task 2: mempool ordering の “全件rekey” を撤廃
+PendingをHeapに寄せるなら「upgradeで消える」前提をAPIで明示、または pre_upgrade退避（ただし巨大だと危険）
 
-“先頭K件だけ評価”方式か、tick化か、割り切りを選ぶ
+AC
 
-ここはチェーン停止リスク直結
+“upgradeでTx消えた” が仕様として説明されている、または消えないよう実装されている
 
-Task 3: from_bytes trap を根絶
+Phase 4: 最適化・簡素化（Low〜Medium）
 
-全 Storable 実装を “破損でも返す”に統一
+目的：コスト削減、複雑性削減、運用事故耐性アップ
 
-「破損検知」用のフラグ or sentinel を入れる
+4.1 get_queue_snapshot(limit) にサーバー側ハードキャップ
 
-Task 4（運用前に）: export/query の hard limit を二重化
+limit = min(limit, MAX_SNAPSHOT)
 
-max_bytes に加えて max_blocks 的な上限
+AC：極端なlimitで壊れない
 
-返却サイズ（2MB）の都合があるので、**“サーバ側で絶対に超えない”**を保証する
+4.2 PruneJournal の扱いを整理
+
+pruneが単発updateで完結するなら削除して簡素化
+
+分割prune（再開が必要）なら “再開点” として残す価値あり
+
+AC：設計方針がドキュメントに落ちている
+
+実装順（現実の手戻りが少ない順）
+
+管理API認可統一（Phase0）
+
+Dropped本文削除（墓標/即時削除）（Phase1.1）
+
+Global/Per-sender cap + nonce window（Phase1.2 + Phase2.2）
+
+inspect_message（軽量フィルタ）（Phase2.1）
+
+TTL eviction（索引 + 定期掃除）（Phase2.3）
+
+不変条件テスト・PBT（Phase3）
+
+query cap / prune整理（Phase4）
+
+仕上げの観点（運用上の最低ライン）
+
+メトリクス：pending数、sender別上位、dropped理由別カウント、stable使用量、cycles残量
+
+緊急停止：controller限定＋できればタイムロック
+
+エラーモデル：Reject理由を体系化（DoS対策は“拒否できること”が武器）

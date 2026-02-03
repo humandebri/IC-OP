@@ -26,6 +26,8 @@ echo "[guard] rng callsite check"
 scripts/check_rng_paths.sh
 echo "[guard] wasm getrandom feature check"
 scripts/check_getrandom_wasm_features.sh
+echo "[guard] did sync check"
+scripts/check_did_sync.sh
 
 cargo test -p evm-db -p ic-evm-core -p ic-evm-wrapper
 
@@ -241,3 +243,6 @@ if [[ "$HAS_ITEM" == "1" ]]; then
 else
   echo "[smoke] queue empty, skipping produce_block"
 fi
+
+echo "[e2e] rpc_compat_e2e"
+scripts/run_rpc_compat_e2e.sh

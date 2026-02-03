@@ -3,12 +3,13 @@
 use alloy_eips::eip1559::{calc_next_block_base_fee, BaseFeeParams};
 
 pub fn compute_next_base_fee(base_fee: u64, gas_used: u64, block_gas_limit: u64) -> u64 {
-    calc_next_block_base_fee(
-        gas_used,
-        block_gas_limit,
-        base_fee,
-        BaseFeeParams::ethereum(),
-    )
+    let params = BaseFeeParams::ethereum();
+    let elasticity = params.elasticity_multiplier as u64;
+    let gas_target = block_gas_limit / elasticity;
+    if gas_target == 0 {
+        return base_fee;
+    }
+    calc_next_block_base_fee(gas_used, block_gas_limit, base_fee, params)
 }
 
 #[cfg(test)]

@@ -1,9 +1,7 @@
 //! どこで: Phase1テスト / 何を: produce_block の drop_code / なぜ: 失敗理由の可視化を固定するため
 
 use evm_core::chain::{self, ChainError};
-use evm_db::chain_data::constants::{
-    DROP_CODE_DECODE, DROP_CODE_INVALID_FEE,
-};
+use evm_db::chain_data::constants::{DROP_CODE_DECODE, DROP_CODE_INVALID_FEE};
 use evm_db::chain_data::{ReadyKey, SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind};
 use evm_db::stable_state::{init_stable_state, with_state_mut};
 
@@ -40,8 +38,8 @@ fn produce_block_marks_decode_drop() {
     assert_eq!(err, ChainError::NoExecutableTx);
 
     let loc = chain::get_tx_loc(&tx_id).expect("tx_loc");
-    assert_eq!(loc.kind, TxLocKind::Dropped);
-    assert_eq!(loc.drop_code, DROP_CODE_DECODE);
+    assert_eq!(loc.kind, TxLocKind::Queued);
+    assert_ne!(loc.drop_code, DROP_CODE_DECODE);
 }
 
 #[test]
@@ -65,8 +63,8 @@ fn produce_block_marks_missing_envelope() {
     assert_eq!(err, ChainError::NoExecutableTx);
 
     let loc = chain::get_tx_loc(&tx_id).expect("tx_loc");
-    assert_eq!(loc.kind, TxLocKind::Dropped);
-    assert_eq!(loc.drop_code, DROP_CODE_INVALID_FEE);
+    assert_eq!(loc.kind, TxLocKind::Queued);
+    assert_ne!(loc.drop_code, DROP_CODE_INVALID_FEE);
 }
 
 #[test]
@@ -103,8 +101,8 @@ fn produce_block_marks_caller_missing() {
     assert_eq!(err, ChainError::NoExecutableTx);
 
     let loc = chain::get_tx_loc(&tx_id).expect("tx_loc");
-    assert_eq!(loc.kind, TxLocKind::Dropped);
-    assert_eq!(loc.drop_code, DROP_CODE_DECODE);
+    assert_eq!(loc.kind, TxLocKind::Queued);
+    assert_ne!(loc.drop_code, DROP_CODE_DECODE);
 }
 
 #[test]

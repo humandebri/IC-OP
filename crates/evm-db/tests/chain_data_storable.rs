@@ -190,9 +190,25 @@ fn ops_metrics_roundtrip() {
         schema_version: 1,
         exec_halt_unknown_count: 7,
         last_exec_halt_unknown_warn_ts: 99,
+        l1_snapshot_disabled_skip_count: 13,
+        last_l1_snapshot_disabled_warn_ts: 101,
     };
     let decoded = OpsMetricsV1::from_bytes(metrics.to_bytes());
     assert_eq!(metrics, decoded);
+}
+
+#[test]
+fn ops_metrics_v1_decode_backfills_snapshot_fields_with_zero() {
+    let mut legacy = vec![0u8; 24];
+    legacy[0] = 1;
+    legacy[8..16].copy_from_slice(&7u64.to_be_bytes());
+    legacy[16..24].copy_from_slice(&99u64.to_be_bytes());
+    let decoded = OpsMetricsV1::from_bytes(legacy.into());
+    assert_eq!(decoded.schema_version, 1);
+    assert_eq!(decoded.exec_halt_unknown_count, 7);
+    assert_eq!(decoded.last_exec_halt_unknown_warn_ts, 99);
+    assert_eq!(decoded.l1_snapshot_disabled_skip_count, 0);
+    assert_eq!(decoded.last_l1_snapshot_disabled_warn_ts, 0);
 }
 
 #[test]

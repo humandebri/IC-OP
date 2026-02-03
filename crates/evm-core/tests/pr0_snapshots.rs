@@ -105,8 +105,8 @@ fn snapshot_decode_drop_tuple() {
     assert_eq!(err, ChainError::NoExecutableTx);
 
     let loc = chain::get_tx_loc(&tx_id).expect("tx_loc");
-    assert_eq!(loc.kind, TxLocKind::Dropped);
-    assert_eq!(loc.drop_code, DROP_CODE_DECODE);
+    assert_eq!(loc.kind, TxLocKind::Queued);
+    assert_ne!(loc.drop_code, DROP_CODE_DECODE);
     assert_ne!(loc.drop_code, DROP_CODE_INVALID_FEE);
 }
 

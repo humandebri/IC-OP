@@ -475,30 +475,19 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         l1_params: *state.l1_block_info_params.get(),
         l1_snapshot: *state.l1_block_info_snapshot.get(),
     });
-    if exec_ctx.l1_snapshot.enabled {
-        execute_l1_block_info_system_tx(&exec_ctx).map_err(|err| {
-            observe_exec_error(&err, timestamp);
-            ChainError::ExecFailed(Some(err))
-        })?;
-    } else {
-        eprintln!("l1 block info system tx skipped: snapshot disabled");
-    }
-
     let mut included: Vec<TxId> = Vec::new();
     let mut dropped_total = 0u64;
     let mut dropped_by_code = [0u64; evm_db::chain_data::metrics::DROP_CODE_SLOTS];
-    let mut tx_ids = Vec::new();
-    with_state_mut(|state| {
-        let base_fee = state.chain_state.get().base_fee;
-        tx_ids = select_ready_candidates(
-            state,
-            base_fee,
-            max_txs,
-            &mut dropped_total,
-            &mut dropped_by_code,
-        );
+    let (min_priority_fee, min_gas_price) = with_state(|state| {
+        let chain_state = state.chain_state.get();
+        (chain_state.min_priority_fee, chain_state.min_gas_price)
     });
-    if tx_ids.is_empty() && dropped_total == 0 {
+    let mut tx_ids = Vec::new();
+    let mut prepared = Vec::new();
+    with_state(|state| {
+        tx_ids = select_ready_candidates(state, state.chain_state.get().base_fee, max_txs);
+    });
+    if tx_ids.is_empty() {
         return Err(ChainError::QueueEmpty);
     }
     let mut block_gas_used = 0u64;
@@ -507,18 +496,24 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         let envelope = match envelope {
             Some(value) => value,
             None => {
-                with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_MISSING)));
-                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_MISSING);
-                with_state_mut(|state| advance_sender_after_tx(state, tx_id, None, None));
+                prepared.push(PreparedItem::Drop(QueuedDrop {
+                    tx_id,
+                    drop_code: DROP_CODE_MISSING,
+                    sender_override: None,
+                    nonce_override: None,
+                }));
                 continue;
             }
         };
         let stored = match StoredTx::try_from(envelope) {
             Ok(value) => value,
             Err(_) => {
-                with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
-                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_DECODE);
-                with_state_mut(|state| advance_sender_after_tx(state, tx_id, None, None));
+                prepared.push(PreparedItem::Drop(QueuedDrop {
+                    tx_id,
+                    drop_code: DROP_CODE_DECODE,
+                    sender_override: None,
+                    nonce_override: None,
+                }));
                 continue;
             }
         };
@@ -527,11 +522,12 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             TxKind::IcSynthetic => match stored.caller_evm {
                 Some(value) => value,
                 None => {
-                    with_state_mut(|state| {
-                        state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_CALLER_MISSING));
-                    });
-                    track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_CALLER_MISSING);
-                    with_state_mut(|state| advance_sender_after_tx(state, tx_id, None, None));
+                    prepared.push(PreparedItem::Drop(QueuedDrop {
+                        tx_id,
+                        drop_code: DROP_CODE_CALLER_MISSING,
+                        sender_override: None,
+                        nonce_override: None,
+                    }));
                     continue;
                 }
             },
@@ -540,21 +536,96 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         let tx_env = match decode_tx(kind, Address::from(caller), &stored.raw) {
             Ok(value) => value,
             Err(_) => {
-                with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE)));
-                track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_DECODE);
-                with_state_mut(|state| advance_sender_after_tx(state, tx_id, Some(caller), None));
+                prepared.push(PreparedItem::Drop(QueuedDrop {
+                    tx_id,
+                    drop_code: DROP_CODE_DECODE,
+                    sender_override: Some(caller),
+                    nonce_override: None,
+                }));
                 continue;
             }
         };
+        if !min_fee_satisfied(
+            &tx_env,
+            exec_ctx.base_fee,
+            min_priority_fee,
+            min_gas_price,
+        ) {
+            let sender_bytes = address_to_bytes(tx_env.caller);
+            prepared.push(PreparedItem::Drop(QueuedDrop {
+                tx_id,
+                drop_code: DROP_CODE_INVALID_FEE,
+                sender_override: Some(sender_bytes),
+                nonce_override: Some(tx_env.nonce),
+            }));
+            continue;
+        }
+        let effective = compute_effective_gas_price(
+            tx_env.gas_price,
+            tx_env.gas_priority_fee.unwrap_or(0),
+            exec_ctx.base_fee,
+        );
+        if effective.is_none() {
+            let sender_bytes = address_to_bytes(tx_env.caller);
+            prepared.push(PreparedItem::Drop(QueuedDrop {
+                tx_id,
+                drop_code: DROP_CODE_INVALID_FEE,
+                sender_override: Some(sender_bytes),
+                nonce_override: Some(tx_env.nonce),
+            }));
+            continue;
+        }
         let sender_bytes = address_to_bytes(tx_env.caller);
         let sender_nonce = tx_env.nonce;
+        prepared.push(PreparedItem::Tx(PreparedTx {
+            tx_id,
+            kind,
+            raw: stored.raw,
+            tx_env,
+            sender_bytes,
+            sender_nonce,
+        }));
+    }
+
+    // 方針: user tx を1件も実行できない場合は空ブロックを作らず system tx も実行しない。
+    if !prepared.iter().any(|item| matches!(item, PreparedItem::Tx(_))) {
+        return Err(ChainError::NoExecutableTx);
+    }
+
+    if exec_ctx.l1_snapshot.enabled {
+        execute_l1_block_info_system_tx(&exec_ctx).map_err(|err| {
+            observe_exec_error(&err, timestamp);
+            ChainError::ExecFailed(Some(err))
+        })?;
+    } else {
+        record_l1_snapshot_disabled_skip(timestamp);
+    }
+
+    for item in prepared {
+        let prepared_tx = match item {
+            PreparedItem::Drop(drop) => {
+                with_state_mut(|state| {
+                    state.tx_locs.insert(drop.tx_id, TxLoc::dropped(drop.drop_code));
+                    advance_sender_after_tx(
+                        state,
+                        drop.tx_id,
+                        drop.sender_override,
+                        drop.nonce_override,
+                    );
+                });
+                track_drop(&mut dropped_total, &mut dropped_by_code, drop.drop_code);
+                continue;
+            }
+            PreparedItem::Tx(value) => value,
+        };
         let tx_index = u32::try_from(included.len()).unwrap_or(u32::MAX);
+        let tx_id = prepared_tx.tx_id;
         let outcome = match execute_tx(
             tx_id,
             tx_index,
-            kind,
-            &stored.raw,
-            tx_env,
+            prepared_tx.kind,
+            &prepared_tx.raw,
+            prepared_tx.tx_env,
             &exec_ctx,
             ExecPath::UserTx,
         ) {
@@ -564,7 +635,14 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                 if err == ExecError::InvalidGasFee {
                     with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_INVALID_FEE)));
                     track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_INVALID_FEE);
-                    with_state_mut(|state| advance_sender_after_tx(state, tx_id, Some(sender_bytes), Some(sender_nonce)));
+                    with_state_mut(|state| {
+                        advance_sender_after_tx(
+                            state,
+                            tx_id,
+                            Some(prepared_tx.sender_bytes),
+                            Some(prepared_tx.sender_nonce),
+                        )
+                    });
                     continue;
                 }
                 let output = Vec::new();
@@ -592,13 +670,23 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         });
                 included.push(tx_id);
                 with_state_mut(|state| {
-                    advance_sender_after_tx(state, tx_id, Some(sender_bytes), Some(sender_nonce))
+                    advance_sender_after_tx(
+                        state,
+                        tx_id,
+                        Some(prepared_tx.sender_bytes),
+                        Some(prepared_tx.sender_nonce),
+                    )
                 });
                 continue;
             }
         };
         with_state_mut(|state| {
-            advance_sender_after_tx(state, tx_id, Some(sender_bytes), Some(sender_nonce))
+            advance_sender_after_tx(
+                state,
+                tx_id,
+                Some(prepared_tx.sender_bytes),
+                Some(prepared_tx.sender_nonce),
+            )
         });
         observe_exec_outcome(timestamp, &outcome);
         if outcome.l1_fee_fallback_used {
@@ -665,6 +753,28 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
     });
 
     Ok(block)
+}
+
+struct PreparedTx {
+    tx_id: TxId,
+    kind: TxKind,
+    raw: Vec<u8>,
+    tx_env: revm::context::TxEnv,
+    sender_bytes: [u8; 20],
+    sender_nonce: u64,
+}
+
+enum PreparedItem {
+    Drop(QueuedDrop),
+    Tx(PreparedTx),
+}
+
+#[derive(Clone, Copy)]
+struct QueuedDrop {
+    tx_id: TxId,
+    drop_code: u16,
+    sender_override: Option<[u8; 20]>,
+    nonce_override: Option<u64>,
 }
 
 pub fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResult, ChainError> {
@@ -787,7 +897,7 @@ fn execute_and_seal_with_caller(
             ChainError::ExecFailed(Some(err))
         })?;
     } else {
-        eprintln!("l1 block info system tx skipped: snapshot disabled");
+        record_l1_snapshot_disabled_skip(timestamp);
     }
 
     let tx_env = decode_tx(kind, Address::from(caller), &stored.raw)
@@ -1139,6 +1249,24 @@ fn record_l1_fee_fallback() {
     }
 }
 
+fn record_l1_snapshot_disabled_skip(now: u64) {
+    let should_warn = with_state_mut(|state| {
+        let mut metrics = *state.ops_metrics.get();
+        metrics.l1_snapshot_disabled_skip_count =
+            metrics.l1_snapshot_disabled_skip_count.saturating_add(1);
+        let should_warn = metrics.last_l1_snapshot_disabled_warn_ts == 0
+            || now.saturating_sub(metrics.last_l1_snapshot_disabled_warn_ts) >= 60;
+        if should_warn {
+            metrics.last_l1_snapshot_disabled_warn_ts = now;
+        }
+        state.ops_metrics.set(metrics);
+        should_warn
+    });
+    if should_warn {
+        eprintln!("l1 block info system tx skipped: snapshot disabled");
+    }
+}
+
 fn observe_exec_error(err: &ExecError, now: u64) {
     if let ExecError::EvmHalt(OpHaltReason::Unknown) = err {
         record_exec_halt_unknown(now);
@@ -1349,7 +1477,7 @@ fn next_pending_for_sender(
 }
 
 fn load_fee_fields_and_seq(
-    state: &mut evm_db::stable_state::StableState,
+    state: &evm_db::stable_state::StableState,
     tx_id: TxId,
 ) -> Result<Option<(u128, u128, bool, u64)>, RekeyError> {
     let envelope = match state.tx_store.get(&tx_id) {
@@ -1362,20 +1490,6 @@ fn load_fee_fields_and_seq(
         stored.max_priority_fee_per_gas,
         stored.is_dynamic_fee,
     );
-    let chain_state = state.chain_state.get();
-    let base_fee = chain_state.base_fee;
-    let min_gas_price = chain_state.min_gas_price;
-    let min_priority_fee = chain_state.min_priority_fee;
-    if !min_fee_satisfied_from_fields(
-        max_fee_per_gas,
-        max_priority_fee_per_gas,
-        is_dynamic_fee,
-        base_fee,
-        min_priority_fee,
-        min_gas_price,
-    ) {
-        return Ok(None);
-    }
     let seq = match state.tx_locs.get(&tx_id) {
         Some(loc) => loc.seq,
         None => return Ok(None),
@@ -1468,45 +1582,17 @@ fn fee_fields_from_tx_env(tx_env: &revm::context::TxEnv) -> (u128, u128, bool) {
     (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee)
 }
 
-// 保存値だけで最小fee条件を判定する。
-fn min_fee_satisfied_from_fields(
-    max_fee_per_gas: u128,
-    max_priority_fee_per_gas: u128,
-    is_dynamic_fee: bool,
-    base_fee: u64,
-    min_priority_fee: u64,
-    min_gas_price: u64,
-) -> bool {
-    if is_dynamic_fee {
-        let min_priority_fee = u128::from(min_priority_fee);
-        if max_priority_fee_per_gas < min_priority_fee {
-            return false;
-        }
-        let base_fee = u128::from(base_fee);
-        let base_plus_min = base_fee.saturating_add(min_priority_fee);
-        max_fee_per_gas >= base_fee && max_fee_per_gas >= base_plus_min
-    } else {
-        max_fee_per_gas >= u128::from(min_gas_price)
-    }
-}
-
 struct ReadyCandidate {
-    key: ReadyKey,
     tx_id: TxId,
     effective_gas_price: u64,
     seq: u64,
 }
 
 fn select_ready_candidates(
-    state: &mut evm_db::stable_state::StableState,
+    state: &evm_db::stable_state::StableState,
     base_fee: u64,
     max_txs: usize,
-    dropped_total: &mut u64,
-    dropped_by_code: &mut [u64],
 ) -> Vec<TxId> {
-    let chain_state = state.chain_state.get();
-    let min_gas_price = chain_state.min_gas_price;
-    let min_priority_fee = chain_state.min_priority_fee;
     let mut keys: Vec<ReadyKey> = Vec::new();
     for entry in state.ready_queue.range(..).take(READY_CANDIDATE_LIMIT) {
         keys.push(*entry.key());
@@ -1521,44 +1607,26 @@ fn select_ready_candidates(
         let fields = load_fee_fields_and_seq(state, tx_id);
         let (max_fee_per_gas, max_priority_fee_per_gas, is_dynamic_fee, seq) = match fields {
             Ok(Some(value)) => value,
-            Ok(None) => {
-                drop_invalid_fee_pending(state, tx_id, Some(dropped_total), Some(dropped_by_code));
-                continue;
-            }
-            Err(RekeyError::DecodeFailed) => {
-                drop_invalid_fee_pending_decode(
-                    state,
+            Ok(None) | Err(RekeyError::DecodeFailed) => {
+                candidates.push(ReadyCandidate {
                     tx_id,
-                    Some(dropped_total),
-                    Some(dropped_by_code),
-                );
+                    effective_gas_price: 0,
+                    seq: key.seq(),
+                });
                 continue;
             }
         };
-        if !min_fee_satisfied_from_fields(
+        let effective_gas_price = compute_effective_gas_price(
             max_fee_per_gas,
-            max_priority_fee_per_gas,
-            is_dynamic_fee,
+            if is_dynamic_fee {
+                max_priority_fee_per_gas
+            } else {
+                0
+            },
             base_fee,
-            min_priority_fee,
-            min_gas_price,
-        ) {
-            drop_invalid_fee_pending(state, tx_id, Some(dropped_total), Some(dropped_by_code));
-            continue;
-        }
-        let effective_gas_price = match compute_effective_gas_price(
-            max_fee_per_gas,
-            if is_dynamic_fee { max_priority_fee_per_gas } else { 0 },
-            base_fee,
-        ) {
-            Some(value) => value,
-            None => {
-                drop_invalid_fee_pending(state, tx_id, Some(dropped_total), Some(dropped_by_code));
-                continue;
-            }
-        };
+        )
+        .unwrap_or(0);
         candidates.push(ReadyCandidate {
-            key,
             tx_id,
             effective_gas_price,
             seq,
@@ -1575,8 +1643,6 @@ fn select_ready_candidates(
 
     let mut selected: Vec<TxId> = Vec::new();
     for candidate in candidates.into_iter().take(max_txs) {
-        state.ready_queue.remove(&candidate.key);
-        state.ready_key_by_tx_id.remove(&candidate.tx_id);
         selected.push(candidate.tx_id);
     }
     selected
@@ -1589,7 +1655,10 @@ enum RekeyError {
 
 #[cfg(test)]
 mod tests {
-    use super::{observe_exec_error, observe_exec_outcome, record_exec_halt_unknown};
+    use super::{
+        observe_exec_error, observe_exec_outcome, record_exec_halt_unknown,
+        record_l1_snapshot_disabled_skip,
+    };
     use crate::revm_exec::{ExecError, OpHaltReason};
     use evm_db::chain_data::{ReceiptLike, TxId};
     use evm_db::stable_state::{init_stable_state, with_state};
@@ -1653,5 +1722,25 @@ mod tests {
         observe_exec_outcome(11, &outcome);
         let state = with_state(|state| *state.ops_metrics.get());
         assert_eq!(state.exec_halt_unknown_count, 1);
+    }
+
+    #[test]
+    fn record_l1_snapshot_disabled_skip_updates_metrics() {
+        init_stable_state();
+        record_l1_snapshot_disabled_skip(10);
+        let metrics = with_state(|state| *state.ops_metrics.get());
+        assert_eq!(metrics.l1_snapshot_disabled_skip_count, 1);
+        assert_eq!(metrics.last_l1_snapshot_disabled_warn_ts, 10);
+    }
+
+    #[test]
+    fn record_l1_snapshot_disabled_skip_rate_limits_warning_timestamp() {
+        init_stable_state();
+        record_l1_snapshot_disabled_skip(10);
+        record_l1_snapshot_disabled_skip(40);
+        record_l1_snapshot_disabled_skip(80);
+        let metrics = with_state(|state| *state.ops_metrics.get());
+        assert_eq!(metrics.l1_snapshot_disabled_skip_count, 3);
+        assert_eq!(metrics.last_l1_snapshot_disabled_warn_ts, 80);
     }
 }

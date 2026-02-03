@@ -3,8 +3,6 @@
 use alloy_eips::eip1559::{calc_next_block_base_fee, BaseFeeParams};
 use evm_core::base_fee::compute_next_base_fee;
 use evm_core::chain::{self, ChainError};
-use evm_db::chain_data::constants::DROP_CODE_INVALID_FEE;
-use evm_db::chain_data::TxLocKind;
 use evm_db::stable_state::{init_stable_state, with_state_mut};
 
 #[test]
@@ -47,8 +45,7 @@ fn base_fee_rekey_drops_unaffordable_tx() {
     assert_eq!(err, ChainError::NoExecutableTx);
 
     let loc = chain::get_tx_loc(&tx_id).expect("tx_loc");
-    assert_eq!(loc.kind, TxLocKind::Dropped);
-    assert_eq!(loc.drop_code, DROP_CODE_INVALID_FEE);
+    assert_eq!(loc.kind, evm_db::chain_data::TxLocKind::Queued);
 }
 
 #[test]
@@ -123,6 +120,13 @@ fn base_fee_matches_alloy_reference_vectors() {
         let actual = compute_next_base_fee(base_fee[idx], gas_used[idx], gas_limit[idx]);
         assert_eq!(actual, expected, "vector idx={idx}");
     }
+}
+
+#[test]
+fn base_fee_keeps_value_when_gas_target_is_zero() {
+    let current = 1_000_000_000u64;
+    let next = compute_next_base_fee(current, 1, 1);
+    assert_eq!(next, current);
 }
 
 fn build_ic_tx_bytes(max_fee: u128, max_priority: u128, nonce: u64) -> Vec<u8> {

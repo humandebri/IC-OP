@@ -29,12 +29,12 @@ type EthBlockView = record {
 type EthReceiptView = record {
   effective_gas_price : nat64;
   status : nat8;
-  tx_index : nat32;
   l1_data_fee : nat;
-  operator_fee : nat;
-  total_fee : nat;
+  tx_index : nat32;
   logs : vec LogView;
+  total_fee : nat;
   block_number : nat64;
+  operator_fee : nat;
   gas_used : nat64;
   contract_address : opt blob;
   tx_hash : blob;
@@ -94,6 +94,23 @@ type HealthView = record {
   queue_len : nat64;
   auto_mine_enabled : bool;
 };
+// NOTE: opt is kept for wire compatibility, but runtime rejects null/opt none.
+type InitArgs = record { genesis_balances : vec GenesisBalanceView };
+type L1BlockInfoParamsView = record {
+  operator_fee_constant : nat;
+  l1_fee_overhead : nat;
+  operator_fee_scalar : nat;
+  l1_base_fee_scalar : nat;
+  spec_id : nat8;
+  l1_blob_base_fee_scalar : nat;
+  empty_ecotone_scalars : bool;
+};
+type L1BlockInfoSnapshotView = record {
+  l1_blob_base_fee : nat;
+  l2_block_number : nat64;
+  l1_base_fee : nat;
+  enabled : bool;
+};
 type LogView = record { data : blob; topics : vec blob; address : blob };
 type LookupError = variant {
   NotFound;
@@ -117,22 +134,22 @@ type MetricsView = record {
   total_included : nat64;
   dev_faucet_enabled : bool;
 };
-type NoOpReason = variant { NoExecutableTx; CycleCritical; NeedsMigration };
+type NoOpReason = variant { CycleCritical; NoExecutableTx; NeedsMigration };
 type OpsConfigView = record {
   low_watermark : nat;
-  critical : nat;
   freeze_on_critical : bool;
+  critical : nat;
 };
-type OpsModeView = variant { Normal; Low; Critical };
+type OpsModeView = variant { Low; Normal; Critical };
 type OpsStatusView = record {
-  config : OpsConfigView;
+  needs_migration : bool;
   last_cycle_balance : nat;
-  last_check_ts : nat64;
   mode : OpsModeView;
+  last_check_ts : nat64;
+  schema_version : nat32;
   safe_stop_latched : bool;
   l1_fee_fallback_count : nat64;
-  needs_migration : bool;
-  schema_version : nat32;
+  config : OpsConfigView;
 };
 type PendingStatusView = variant {
   Queued : record { seq : nat64 };
@@ -185,15 +202,15 @@ type QueueSnapshotView = record {
 type ReceiptView = record {
   effective_gas_price : nat64;
   status : nat8;
+  l1_data_fee : nat;
   tx_id : blob;
   tx_index : nat32;
-  l1_data_fee : nat;
-  operator_fee : nat;
-  total_fee : nat;
   return_data_hash : blob;
   logs : vec LogView;
   return_data : opt blob;
+  total_fee : nat;
   block_number : nat64;
+  operator_fee : nat;
   gas_used : nat64;
   contract_address : opt blob;
 };
@@ -211,9 +228,7 @@ type SubmitTxError = variant {
   Rejected : text;
   InvalidArgument : text;
 };
-type TxKindView = variant { EthSigned; IcSynthetic; OpDeposit };
-// NOTE: opt is kept for wire compatibility, but runtime rejects null/opt none.
-type InitArgs = record { genesis_balances : vec GenesisBalanceView };
+type TxKindView = variant { OpDeposit; EthSigned; IcSynthetic };
 service : (opt InitArgs) -> {
   execute_eth_raw_tx : (blob) -> (Result);
   execute_ic_tx : (blob) -> (Result);
@@ -221,6 +236,8 @@ service : (opt InitArgs) -> {
   export_blocks : (opt ExportCursorView, nat32) -> (Result_2) query;
   get_block : (nat64) -> (Result_3) query;
   get_cycle_balance : () -> (nat) query;
+  get_l1_block_info_params : () -> (L1BlockInfoParamsView) query;
+  get_l1_block_info_snapshot : () -> (L1BlockInfoSnapshotView) query;
   get_ops_status : () -> (OpsStatusView) query;
   get_pending : (blob) -> (PendingStatusView) query;
   get_prune_status : () -> (PruneStatusView) query;
@@ -237,6 +254,8 @@ service : (opt InitArgs) -> {
   rpc_eth_get_transaction_receipt : (blob) -> (opt EthReceiptView) query;
   rpc_eth_send_raw_transaction : (blob) -> (Result_7);
   set_auto_mine : (bool) -> ();
+  set_l1_block_info_params : (L1BlockInfoParamsView) -> (Result_8);
+  set_l1_block_info_snapshot : (L1BlockInfoSnapshotView) -> (Result_8);
   set_mining_interval_ms : (nat64) -> ();
   set_ops_config : (OpsConfigView) -> (Result_8);
   set_prune_policy : (PrunePolicyView) -> (Result_8);

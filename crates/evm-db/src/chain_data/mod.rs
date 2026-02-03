@@ -7,6 +7,7 @@ pub mod constants;
 pub mod l1_block_info;
 pub mod metrics;
 pub mod ops;
+pub mod ops_metrics;
 pub mod ordering;
 pub mod prune_config;
 pub mod prune_state;
@@ -28,6 +29,7 @@ pub use constants::{
 };
 pub use metrics::{MetricsStateV1, MetricsWindowSummary, METRICS_BUCKETS};
 pub use ops::{OpsConfigV1, OpsMode, OpsStateV1};
+pub use ops_metrics::{OpsMetricsV1, OPS_METRICS_SIZE_U32};
 pub use ordering::{ReadyKey, SenderKey, SenderNonceKey};
 pub use prune_config::{PruneConfigV1, PrunePolicy};
 pub use prune_state::{PruneJournal, PruneStateV1};

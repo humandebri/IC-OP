@@ -61,7 +61,7 @@ fn snapshot_tx_outcome_matrix_and_block_fields() {
 
     assert_eq!(
         matrix,
-        "tx_statuses=[1, 0, 0] final_statuses=[Success, Revert, Halt:Base(InvalidFEOpcode)]"
+        "tx_statuses=[1, 0, 0] final_statuses=[Success, Revert, Halt:InvalidOpcode]"
     );
     // 意図差分の履歴:
     // - PR4: system tx skip導入で state_root/block_hash が更新

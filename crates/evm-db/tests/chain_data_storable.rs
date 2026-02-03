@@ -3,7 +3,8 @@
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{
     BlockData, CallerKey, ChainStateV1, Head, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1,
-    QueueMeta, ReceiptLike, StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
+    OpsMetricsV1, QueueMeta, ReceiptLike, StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind,
+    TxLoc,
 };
 use ic_stable_structures::Storable;
 
@@ -181,6 +182,17 @@ fn l1_block_info_roundtrip() {
     };
     let snapshot_decoded = L1BlockInfoSnapshotV1::from_bytes(snapshot.to_bytes());
     assert_eq!(snapshot, snapshot_decoded);
+}
+
+#[test]
+fn ops_metrics_roundtrip() {
+    let metrics = OpsMetricsV1 {
+        schema_version: 1,
+        exec_halt_unknown_count: 7,
+        last_exec_halt_unknown_warn_ts: 99,
+    };
+    let decoded = OpsMetricsV1::from_bytes(metrics.to_bytes());
+    assert_eq!(metrics, decoded);
 }
 
 #[test]

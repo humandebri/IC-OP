@@ -5,7 +5,7 @@ use crate::blob_store::BlobStore;
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::chain_data::{
     CallerKey, ChainStateV1, Head, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, MetricsStateV1,
-    OpsConfigV1, OpsStateV1, PruneConfigV1,
+    OpsConfigV1, OpsMetricsV1, OpsStateV1, PruneConfigV1,
     PruneJournal, PruneStateV1, QueueMeta, SenderKey, SenderNonceKey, StoredTxBytes, TxId,
     ReadyKey,
 };
@@ -54,6 +54,7 @@ pub struct StableState {
     pub prune_config: StableCell<PruneConfigV1, VMem>,
     pub ops_config: StableCell<OpsConfigV1, VMem>,
     pub ops_state: StableCell<OpsStateV1, VMem>,
+    pub ops_metrics: StableCell<OpsMetricsV1, VMem>,
     pub l1_block_info_params: StableCell<L1BlockInfoParamsV1, VMem>,
     pub l1_block_info_snapshot: StableCell<L1BlockInfoSnapshotV1, VMem>,
     pub prune_journal: PruneJournalMap,
@@ -106,6 +107,7 @@ pub fn init_stable_state() {
     let prune_config = StableCell::init(get_memory(AppMemoryId::PruneConfig), PruneConfigV1::new());
     let ops_config = StableCell::init(get_memory(AppMemoryId::OpsConfig), OpsConfigV1::new());
     let ops_state = StableCell::init(get_memory(AppMemoryId::OpsState), OpsStateV1::new());
+    let ops_metrics = StableCell::init(get_memory(AppMemoryId::OpsMetrics), OpsMetricsV1::new());
     let l1_block_info_params = StableCell::init(
         get_memory(AppMemoryId::L1BlockInfoParams),
         L1BlockInfoParamsV1::new(),
@@ -146,6 +148,7 @@ pub fn init_stable_state() {
             prune_config,
             ops_config,
             ops_state,
+            ops_metrics,
             l1_block_info_params,
             l1_block_info_snapshot,
             prune_journal,

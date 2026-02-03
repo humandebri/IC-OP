@@ -131,10 +131,36 @@
 
 ## PR7: エラー/停止理由の固定
 
-- [ ] 文字列エラー中心の返却をやめ、安定分類へ寄せる
-- [ ] `OpHaltReason` / `OpTransactionError` を上位へ伝播可能にする
-- [ ] Deposit failure特例を保持
-- [ ] canister APIへのマッピング表を固定
+- [x] 文字列エラー中心の返却をやめ、安定分類へ寄せる
+- [x] `OpHaltReason` / `OpTransactionError` を上位へ伝播可能にする
+- [x] Deposit failure特例を保持
+- [x] canister APIへのマッピング表を固定
+
+固定マッピング（wrapper `Rejected("exec.*")`）:
+- `Revert` -> `exec.revert`
+- `Decode(_)` -> `exec.decode.failed`
+- `TxError(TxBuildFailed)` -> `exec.tx.build_failed`
+- `TxError(TxRejectedByPolicy)` -> `exec.tx.rejected_by_policy`
+- `TxError(TxPrecheckFailed)` -> `exec.tx.precheck_failed`
+- `TxError(TxExecutionFailed)` -> `exec.tx.execution_failed`
+- `FailedDeposit` -> `exec.deposit.failed`
+- `SystemTxRejected` -> `exec.system_tx.rejected`
+- `InvalidL1SpecId(_)` -> `exec.l1_spec.invalid`
+- `InvalidGasFee` -> `exec.gas_fee.invalid`
+- `EvmHalt(OutOfGas)` -> `exec.halt.out_of_gas`
+- `EvmHalt(InvalidOpcode)` -> `exec.halt.invalid_opcode`
+- `EvmHalt(StackOverflow)` -> `exec.halt.stack_overflow`
+- `EvmHalt(StackUnderflow)` -> `exec.halt.stack_underflow`
+- `EvmHalt(InvalidJump)` -> `exec.halt.invalid_jump`
+- `EvmHalt(StateChangeDuringStaticCall)` -> `exec.halt.static_state_change`
+- `EvmHalt(PrecompileError)` -> `exec.halt.precompile_error`
+- `EvmHalt(Unknown)` -> `exec.halt.unknown`
+- `ExecutionFailed` / `ExecFailed(None)` -> `exec.execution.failed`
+
+境界仕様（固定）:
+- user tx の `Revert/Halt` は `ExecResult(status=0)` で返す（Rejectedにしない）
+- `Rejected("exec.*")` は `ChainError::ExecFailed` 経路に限定する
+- Unknown halt 観測は `ExecFailed` だけでなく `Ok(ExecOutcome)` 境界でも実施する
 
 対象ファイル（主）:
 - `crates/evm-core/src/revm_exec.rs`

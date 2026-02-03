@@ -4,7 +4,7 @@ use crate::base_fee::compute_next_base_fee;
 use crate::hash;
 use crate::revm_exec::{
     compute_effective_gas_price, execute_l1_block_info_system_tx, execute_tx, BlockExecContext,
-    ExecError, ExecPath,
+    ExecError, ExecOutcome, ExecPath, OpHaltReason,
 };
 use crate::state_root::compute_state_root_with;
 use crate::tx_submit;
@@ -476,8 +476,10 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         l1_snapshot: *state.l1_block_info_snapshot.get(),
     });
     if exec_ctx.l1_snapshot.enabled {
-        execute_l1_block_info_system_tx(&exec_ctx)
-            .map_err(|err| ChainError::ExecFailed(Some(err)))?;
+        execute_l1_block_info_system_tx(&exec_ctx).map_err(|err| {
+            observe_exec_error(&err, timestamp);
+            ChainError::ExecFailed(Some(err))
+        })?;
     } else {
         eprintln!("l1 block info system tx skipped: snapshot disabled");
     }
@@ -558,6 +560,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         ) {
             Ok(value) => value,
             Err(err) => {
+                observe_exec_error(&err, timestamp);
                 if err == ExecError::InvalidGasFee {
                     with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_INVALID_FEE)));
                     track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_INVALID_FEE);
@@ -597,6 +600,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         with_state_mut(|state| {
             advance_sender_after_tx(state, tx_id, Some(sender_bytes), Some(sender_nonce))
         });
+        observe_exec_outcome(timestamp, &outcome);
         if outcome.l1_fee_fallback_used {
             record_l1_fee_fallback();
         }
@@ -778,8 +782,10 @@ fn execute_and_seal_with_caller(
         l1_snapshot: *state.l1_block_info_snapshot.get(),
     });
     if exec_ctx.l1_snapshot.enabled {
-        execute_l1_block_info_system_tx(&exec_ctx)
-            .map_err(|err| ChainError::ExecFailed(Some(err)))?;
+        execute_l1_block_info_system_tx(&exec_ctx).map_err(|err| {
+            observe_exec_error(&err, timestamp);
+            ChainError::ExecFailed(Some(err))
+        })?;
     } else {
         eprintln!("l1 block info system tx skipped: snapshot disabled");
     }
@@ -792,11 +798,13 @@ fn execute_and_seal_with_caller(
     let outcome = match execute_tx(tx_id, 0, kind, &stored.raw, tx_env, &exec_ctx, ExecPath::UserTx) {
         Ok(value) => value,
         Err(err) => {
+            observe_exec_error(&err, timestamp);
             let sender_key = SenderKey::new(sender_bytes);
             with_state_mut(|state| drop_exec_pending(state, tx_id, sender_key));
             return Err(ChainError::ExecFailed(Some(err)));
         }
     };
+    observe_exec_outcome(timestamp, &outcome);
     if outcome.l1_fee_fallback_used {
         record_l1_fee_fallback();
     }
@@ -1128,6 +1136,35 @@ fn record_l1_fee_fallback() {
     });
     if should_warn {
         eprintln!("l1 fee fallback used: snapshot is disabled");
+    }
+}
+
+fn observe_exec_error(err: &ExecError, now: u64) {
+    if let ExecError::EvmHalt(OpHaltReason::Unknown) = err {
+        record_exec_halt_unknown(now);
+    }
+}
+
+fn observe_exec_outcome(now: u64, outcome: &ExecOutcome) {
+    if outcome.halt_reason == Some(OpHaltReason::Unknown) {
+        record_exec_halt_unknown(now);
+    }
+}
+
+fn record_exec_halt_unknown(now: u64) {
+    let should_warn = with_state_mut(|state| {
+        let mut metrics = *state.ops_metrics.get();
+        metrics.exec_halt_unknown_count = metrics.exec_halt_unknown_count.saturating_add(1);
+        let should_warn = metrics.last_exec_halt_unknown_warn_ts == 0
+            || now.saturating_sub(metrics.last_exec_halt_unknown_warn_ts) >= 60;
+        if should_warn {
+            metrics.last_exec_halt_unknown_warn_ts = now;
+        }
+        state.ops_metrics.set(metrics);
+        should_warn
+    });
+    if should_warn {
+        eprintln!("exec halt reason fell back to unknown");
     }
 }
 
@@ -1548,4 +1585,73 @@ fn select_ready_candidates(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RekeyError {
     DecodeFailed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{observe_exec_error, observe_exec_outcome, record_exec_halt_unknown};
+    use crate::revm_exec::{ExecError, OpHaltReason};
+    use evm_db::chain_data::{ReceiptLike, TxId};
+    use evm_db::stable_state::{init_stable_state, with_state};
+
+    #[test]
+    fn record_exec_halt_unknown_updates_counter() {
+        init_stable_state();
+        record_exec_halt_unknown(10);
+        let state = with_state(|state| *state.ops_metrics.get());
+        assert_eq!(state.exec_halt_unknown_count, 1);
+        assert_eq!(state.last_exec_halt_unknown_warn_ts, 10);
+    }
+
+    #[test]
+    fn observe_exec_error_tracks_only_unknown_halt() {
+        init_stable_state();
+        observe_exec_error(&ExecError::EvmHalt(OpHaltReason::Unknown), 10);
+        observe_exec_error(&ExecError::ExecutionFailed, 10);
+        observe_exec_error(&ExecError::EvmHalt(OpHaltReason::InvalidOpcode), 10);
+        let state = with_state(|state| *state.ops_metrics.get());
+        assert_eq!(state.exec_halt_unknown_count, 1);
+    }
+
+    #[test]
+    fn record_exec_halt_unknown_rate_limits_warning_timestamp() {
+        init_stable_state();
+        record_exec_halt_unknown(10);
+        record_exec_halt_unknown(40);
+        record_exec_halt_unknown(80);
+        let state = with_state(|state| *state.ops_metrics.get());
+        assert_eq!(state.exec_halt_unknown_count, 3);
+        assert_eq!(state.last_exec_halt_unknown_warn_ts, 80);
+    }
+
+    #[test]
+    fn observe_exec_outcome_tracks_unknown_halt_from_ok_path() {
+        init_stable_state();
+        let outcome = crate::revm_exec::ExecOutcome {
+            tx_id: TxId([0u8; 32]),
+            tx_index: 0,
+            receipt: ReceiptLike {
+                tx_id: TxId([0u8; 32]),
+                block_number: 1,
+                tx_index: 0,
+                status: 0,
+                gas_used: 0,
+                effective_gas_price: 0,
+                l1_data_fee: 0,
+                operator_fee: 0,
+                total_fee: 0,
+                return_data_hash: [0u8; 32],
+                return_data: Vec::new(),
+                contract_address: None,
+                logs: Vec::new(),
+            },
+            return_data: Vec::new(),
+            final_status: "Halt:Unknown".to_string(),
+            halt_reason: Some(OpHaltReason::Unknown),
+            l1_fee_fallback_used: false,
+        };
+        observe_exec_outcome(11, &outcome);
+        let state = with_state(|state| *state.ops_metrics.get());
+        assert_eq!(state.exec_halt_unknown_count, 1);
+    }
 }

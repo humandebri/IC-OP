@@ -413,7 +413,23 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> 
     if let Some(reason) = reject_write_reason() {
         return Err(ExecuteTxError::Rejected(reason));
     }
-    let result = match chain::execute_eth_raw_tx(raw_tx) {
+    map_execute_chain_result(chain::execute_eth_raw_tx(raw_tx))
+}
+
+#[ic_cdk::update]
+fn execute_ic_tx(tx_bytes: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
+    if let Some(reason) = reject_write_reason() {
+        return Err(ExecuteTxError::Rejected(reason));
+    }
+    let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
+    let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
+    map_execute_chain_result(chain::execute_ic_tx(caller_principal, canister_id, tx_bytes))
+}
+
+fn map_execute_chain_result(
+    result: Result<chain::ExecResult, chain::ChainError>,
+) -> Result<ExecResultDto, ExecuteTxError> {
+    let result = match result {
         Ok(value) => value,
         Err(chain::ChainError::DecodeFailed) => {
             return Err(ExecuteTxError::InvalidArgument("decode failed".to_string()));
@@ -437,60 +453,11 @@ fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> 
             return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
         }
         Err(chain::ChainError::ExecFailed(err)) => {
-            debug_print(format!("execute_ic_tx exec_failed: {:?}", err));
-            let detail = format!("execution failed: {:?}", err);
-            return Err(ExecuteTxError::Rejected(detail));
+            let code = exec_error_to_code(err.as_ref());
+            return Err(ExecuteTxError::Rejected(code.to_string()));
         }
         Err(err) => {
-            debug_print(format!("execute_eth_raw_tx err: {:?}", err));
-            return Err(ExecuteTxError::Internal(format!("{:?}", err)));
-        }
-    };
-    Ok(ExecResultDto {
-        tx_id: result.tx_id.0.to_vec(),
-        block_number: result.block_number,
-        tx_index: result.tx_index,
-        status: result.status,
-        gas_used: result.gas_used,
-        return_data: clamp_return_data(result.return_data),
-    })
-}
-
-#[ic_cdk::update]
-fn execute_ic_tx(tx_bytes: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(ExecuteTxError::Rejected(reason));
-    }
-    let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
-    let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
-    let result = match chain::execute_ic_tx(caller_principal, canister_id, tx_bytes) {
-        Ok(value) => value,
-        Err(chain::ChainError::DecodeFailed) => {
-            return Err(ExecuteTxError::InvalidArgument("decode failed".to_string()));
-        }
-        Err(chain::ChainError::TxTooLarge) => {
-            return Err(ExecuteTxError::InvalidArgument("tx too large".to_string()));
-        }
-        Err(chain::ChainError::TxAlreadySeen) => {
-            return Err(ExecuteTxError::Rejected("tx already seen".to_string()));
-        }
-        Err(chain::ChainError::InvalidFee) => {
-            return Err(ExecuteTxError::Rejected("invalid fee".to_string()));
-        }
-        Err(chain::ChainError::NonceTooLow) => {
-            return Err(ExecuteTxError::Rejected("nonce too low".to_string()));
-        }
-        Err(chain::ChainError::NonceGap) => {
-            return Err(ExecuteTxError::Rejected("nonce gap".to_string()));
-        }
-        Err(chain::ChainError::NonceConflict) => {
-            return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
-        }
-        Err(chain::ChainError::ExecFailed(_)) => {
-            return Err(ExecuteTxError::Rejected("execution failed".to_string()));
-        }
-        Err(err) => {
-            debug_print(format!("execute_ic_tx err: {:?}", err));
+            debug_print(format!("execute_tx err: {:?}", err));
             return Err(ExecuteTxError::Internal(format!("{:?}", err)));
         }
     };
@@ -1167,6 +1134,39 @@ fn tx_kind_to_view(kind: TxKind) -> TxKindView {
     }
 }
 
+fn exec_error_to_code(err: Option<&evm_core::revm_exec::ExecError>) -> &'static str {
+    use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
+
+    match err {
+        None => "exec.execution.failed",
+        Some(ExecError::Decode(_)) => "exec.decode.failed",
+        Some(ExecError::TxError(OpTransactionError::TxBuildFailed)) => "exec.tx.build_failed",
+        Some(ExecError::TxError(OpTransactionError::TxRejectedByPolicy)) => {
+            "exec.tx.rejected_by_policy"
+        }
+        Some(ExecError::TxError(OpTransactionError::TxPrecheckFailed)) => "exec.tx.precheck_failed",
+        Some(ExecError::TxError(OpTransactionError::TxExecutionFailed)) => {
+            "exec.tx.execution_failed"
+        }
+        Some(ExecError::Revert) => "exec.revert",
+        Some(ExecError::FailedDeposit) => "exec.deposit.failed",
+        Some(ExecError::SystemTxRejected) => "exec.system_tx.rejected",
+        Some(ExecError::EvmHalt(OpHaltReason::OutOfGas)) => "exec.halt.out_of_gas",
+        Some(ExecError::EvmHalt(OpHaltReason::InvalidOpcode)) => "exec.halt.invalid_opcode",
+        Some(ExecError::EvmHalt(OpHaltReason::StackOverflow)) => "exec.halt.stack_overflow",
+        Some(ExecError::EvmHalt(OpHaltReason::StackUnderflow)) => "exec.halt.stack_underflow",
+        Some(ExecError::EvmHalt(OpHaltReason::InvalidJump)) => "exec.halt.invalid_jump",
+        Some(ExecError::EvmHalt(OpHaltReason::StateChangeDuringStaticCall)) => {
+            "exec.halt.static_state_change"
+        }
+        Some(ExecError::EvmHalt(OpHaltReason::PrecompileError)) => "exec.halt.precompile_error",
+        Some(ExecError::EvmHalt(OpHaltReason::Unknown)) => "exec.halt.unknown",
+        Some(ExecError::InvalidL1SpecId(_)) => "exec.l1_spec.invalid",
+        Some(ExecError::InvalidGasFee) => "exec.gas_fee.invalid",
+        Some(ExecError::ExecutionFailed) => "exec.execution.failed",
+    }
+}
+
 fn pending_to_view(loc: Option<TxLoc>) -> PendingStatusView {
     match loc {
         Some(TxLoc {
@@ -1582,8 +1582,14 @@ pub fn export_did() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_return_data, is_valid_l1_spec_id, tx_id_from_bytes};
+    use super::{
+        clamp_return_data, exec_error_to_code, is_valid_l1_spec_id, map_execute_chain_result,
+        tx_id_from_bytes, ExecuteTxError,
+    };
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
+    use evm_db::chain_data::TxId;
+    use evm_core::chain::{ChainError, ExecResult};
+    use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
 
     #[test]
     fn clamp_return_data_rejects_oversize() {
@@ -1623,4 +1629,84 @@ mod tests {
         assert!(!is_valid_l1_spec_id(111));
     }
 
+    #[test]
+    fn exec_error_codes_match_fixed_pattern() {
+        let inputs = [
+            Some(ExecError::Decode(evm_core::tx_decode::DecodeError::InvalidRlp)),
+            Some(ExecError::TxError(OpTransactionError::TxBuildFailed)),
+            Some(ExecError::TxError(OpTransactionError::TxRejectedByPolicy)),
+            Some(ExecError::TxError(OpTransactionError::TxPrecheckFailed)),
+            Some(ExecError::TxError(OpTransactionError::TxExecutionFailed)),
+            Some(ExecError::Revert),
+            Some(ExecError::FailedDeposit),
+            Some(ExecError::SystemTxRejected),
+            Some(ExecError::EvmHalt(OpHaltReason::OutOfGas)),
+            Some(ExecError::EvmHalt(OpHaltReason::InvalidOpcode)),
+            Some(ExecError::EvmHalt(OpHaltReason::StackOverflow)),
+            Some(ExecError::EvmHalt(OpHaltReason::StackUnderflow)),
+            Some(ExecError::EvmHalt(OpHaltReason::InvalidJump)),
+            Some(ExecError::EvmHalt(OpHaltReason::StateChangeDuringStaticCall)),
+            Some(ExecError::EvmHalt(OpHaltReason::PrecompileError)),
+            Some(ExecError::EvmHalt(OpHaltReason::Unknown)),
+            Some(ExecError::InvalidL1SpecId(99)),
+            Some(ExecError::InvalidGasFee),
+            Some(ExecError::ExecutionFailed),
+            None,
+        ];
+
+        for err in inputs.iter() {
+            let code = exec_error_to_code(err.as_ref());
+            assert!(is_exec_code(code), "unexpected code: {code}");
+            assert!(!code.contains('{'));
+            assert!(!code.contains('}'));
+            assert!(!code.contains(':'));
+        }
+    }
+
+    #[test]
+    fn exec_error_to_code_matches_expected_set() {
+        let code = exec_error_to_code(Some(&ExecError::Revert));
+        assert_eq!(code, "exec.revert");
+        let code = exec_error_to_code(Some(&ExecError::EvmHalt(OpHaltReason::Unknown)));
+        assert_eq!(code, "exec.halt.unknown");
+        let code = exec_error_to_code(Some(&ExecError::TxError(OpTransactionError::TxBuildFailed)));
+        assert_eq!(code, "exec.tx.build_failed");
+    }
+
+    #[test]
+    fn status_zero_exec_result_is_not_rejected() {
+        let result = map_execute_chain_result(Ok(ExecResult {
+            tx_id: TxId([0u8; 32]),
+            block_number: 1,
+            tx_index: 0,
+            status: 0,
+            gas_used: 21_000,
+            return_data: Vec::new(),
+            final_status: "Revert".to_string(),
+        }))
+        .expect("status=0 should still be Ok");
+        assert_eq!(result.status, 0);
+    }
+
+    #[test]
+    fn exec_failed_maps_to_rejected_exec_code() {
+        let err = map_execute_chain_result(Err(ChainError::ExecFailed(Some(ExecError::Revert))))
+            .expect_err("exec failed should be rejected");
+        match err {
+            ExecuteTxError::Rejected(code) => assert_eq!(code, "exec.revert"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    fn is_exec_code(value: &str) -> bool {
+        if !value.starts_with("exec.") {
+            return false;
+        }
+        value.chars().all(|ch| {
+            ch == '.'
+                || ch == '_'
+                || ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+        })
+    }
 }

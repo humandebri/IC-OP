@@ -12,21 +12,46 @@ use evm_db::stable_state::with_state_mut;
 use ic_stable_structures::Storable;
 use op_revm::constants::L1_BLOCK_CONTRACT;
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
-use op_revm::{DefaultOp, L1BlockInfo, OpBuilder, OpContext, OpSpecId, OpTransaction};
+use op_revm::{
+    DefaultOp, L1BlockInfo, OpBuilder, OpContext, OpHaltReason as RevmOpHaltReason, OpSpecId,
+    OpTransaction, OpTransactionError as RevmOpTransactionError,
+};
 use revm::context::{BlockEnv, TxEnv};
-use revm::context_interface::result::ExecutionResult;
+use revm::context_interface::result::{EVMError, ExecutionResult, HaltReason};
 use revm::handler::{ExecuteCommitEvm, ExecuteEvm, SystemCallEvm};
 use revm::primitives::{Address, B256, Bytes, U256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecError {
     Decode(DecodeError),
+    TxError(OpTransactionError),
+    Revert,
     FailedDeposit,
     SystemTxRejected,
-    EvmHalt(String),
+    EvmHalt(OpHaltReason),
     InvalidL1SpecId(u8),
     ExecutionFailed,
     InvalidGasFee,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpTransactionError {
+    TxBuildFailed,
+    TxRejectedByPolicy,
+    TxPrecheckFailed,
+    TxExecutionFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpHaltReason {
+    OutOfGas,
+    InvalidOpcode,
+    StackOverflow,
+    StackUnderflow,
+    InvalidJump,
+    StateChangeDuringStaticCall,
+    PrecompileError,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +66,7 @@ pub struct ExecOutcome {
     pub receipt: ReceiptLike,
     pub return_data: Vec<u8>,
     pub final_status: String,
+    pub halt_reason: Option<OpHaltReason>,
     pub l1_fee_fallback_used: bool,
 }
 
@@ -90,11 +116,11 @@ pub fn execute_tx(
     .ok_or(ExecError::InvalidGasFee)?;
     let mut evm = build_op_context(exec_ctx, spec).build_op();
     let op_tx = build_op_transaction(tx_kind, raw_tx, tx_env, exec_path)?;
-    let result = evm.transact(op_tx).map_err(|_| ExecError::ExecutionFailed)?;
+    let result = evm.transact(op_tx).map_err(map_tx_error_stage)?;
     let state_diff = collect_state_diff(result.state);
     commit_state_diff(&mut evm, state_diff);
 
-    let (status, gas_used, output, contract_address, logs, final_status) = match result.result {
+    let (status, gas_used, output, contract_address, logs, final_status, halt_reason) = match result.result {
         ExecutionResult::Success {
             gas_used,
             output,
@@ -110,22 +136,32 @@ pub fn execute_tx(
                 addr,
                 mapped,
                 "Success".to_string(),
+                None,
             )
         }
         ExecutionResult::Revert { gas_used, output } => {
-            (0u8, gas_used, output.to_vec(), None, Vec::new(), "Revert".to_string())
+            (
+                0u8,
+                gas_used,
+                output.to_vec(),
+                None,
+                Vec::new(),
+                "Revert".to_string(),
+                None,
+            )
         }
-        ExecutionResult::Halt {
-            gas_used,
-            reason,
-        } => (
-            0u8,
-            gas_used,
-            Vec::new(),
-            None,
-            Vec::new(),
-            format!("Halt:{reason:?}"),
-        ),
+        ExecutionResult::Halt { gas_used, reason } => {
+            let fixed = map_halt_reason(reason);
+            (
+                0u8,
+                gas_used,
+                Vec::new(),
+                None,
+                Vec::new(),
+                format!("Halt:{fixed:?}"),
+                Some(fixed),
+            )
+        }
     };
     let fee_breakdown = compute_fee_breakdown(raw_tx, gas_used, spec, exec_ctx);
 
@@ -155,6 +191,7 @@ pub fn execute_tx(
         receipt,
         return_data: output,
         final_status,
+        halt_reason,
         l1_fee_fallback_used: fee_breakdown.fallback_used,
     })
 }
@@ -165,11 +202,17 @@ pub fn execute_l1_block_info_system_tx(exec_ctx: &BlockExecContext) -> Result<()
     let call_data = build_l1blockinfo_calldata(spec, exec_ctx)?;
     let result = evm
         .system_call(L1_BLOCK_CONTRACT, call_data)
-        .map_err(|_| ExecError::SystemTxRejected)?;
+        .map_err(|_| ExecError::TxError(OpTransactionError::TxExecutionFailed))?;
     match result.result {
         ExecutionResult::Success { .. } => {}
-        ExecutionResult::Revert { .. } => return Err(ExecError::SystemTxRejected),
-        ExecutionResult::Halt { reason, .. } => return Err(ExecError::EvmHalt(format!("{reason:?}"))),
+        ExecutionResult::Revert { .. } => return Err(ExecError::Revert),
+        ExecutionResult::Halt { reason, .. } => {
+            if reason == RevmOpHaltReason::FailedDeposit {
+                return Err(ExecError::FailedDeposit);
+            }
+            let fixed = map_halt_reason(reason);
+            return Err(ExecError::EvmHalt(fixed));
+        }
     }
     let state_diff = collect_state_diff(result.state);
     commit_state_diff(&mut evm, state_diff);
@@ -332,7 +375,7 @@ fn build_op_transaction(
         .base(base)
         .enveloped_tx(Some(raw_tx.to_vec().into()))
         .build()
-        .map_err(|_| ExecError::ExecutionFailed)
+        .map_err(|_| ExecError::TxError(OpTransactionError::TxBuildFailed))
 }
 
 fn compute_fee_breakdown(
@@ -397,6 +440,44 @@ fn op_spec_id_from_u8(value: u8) -> Result<OpSpecId, u8> {
     }
 }
 
+fn map_halt_reason(reason: RevmOpHaltReason) -> OpHaltReason {
+    match reason {
+        RevmOpHaltReason::FailedDeposit => OpHaltReason::Unknown,
+        RevmOpHaltReason::Base(base) => match base {
+            HaltReason::OutOfGas(_) => OpHaltReason::OutOfGas,
+            HaltReason::OpcodeNotFound | HaltReason::InvalidFEOpcode => OpHaltReason::InvalidOpcode,
+            HaltReason::StackOverflow => OpHaltReason::StackOverflow,
+            HaltReason::StackUnderflow => OpHaltReason::StackUnderflow,
+            HaltReason::InvalidJump => OpHaltReason::InvalidJump,
+            HaltReason::StateChangeDuringStaticCall | HaltReason::CallNotAllowedInsideStatic => {
+                OpHaltReason::StateChangeDuringStaticCall
+            }
+            HaltReason::PrecompileError | HaltReason::PrecompileErrorWithContext(_) => {
+                OpHaltReason::PrecompileError
+            }
+            _ => OpHaltReason::Unknown,
+        },
+    }
+}
+
+fn map_tx_error_stage(error: EVMError<core::convert::Infallible, RevmOpTransactionError>) -> ExecError {
+    match error {
+        EVMError::Transaction(tx_err) => match tx_err {
+            RevmOpTransactionError::DepositSystemTxPostRegolith => {
+                ExecError::TxError(OpTransactionError::TxRejectedByPolicy)
+            }
+            RevmOpTransactionError::HaltedDepositPostRegolith => ExecError::FailedDeposit,
+            RevmOpTransactionError::MissingEnvelopedTx => {
+                ExecError::TxError(OpTransactionError::TxBuildFailed)
+            }
+            RevmOpTransactionError::Base(_) => ExecError::TxError(OpTransactionError::TxPrecheckFailed),
+        },
+        EVMError::Header(_) => ExecError::TxError(OpTransactionError::TxPrecheckFailed),
+        EVMError::Database(_) => ExecError::TxError(OpTransactionError::TxExecutionFailed),
+        EVMError::Custom(_) => ExecError::TxError(OpTransactionError::TxExecutionFailed),
+    }
+}
+
 fn saturating_u256_to_u128(value: U256) -> u128 {
     u128::try_from(value).unwrap_or(u128::MAX)
 }
@@ -442,10 +523,12 @@ mod tests {
         compute_fee_breakdown, execute_tx, op_spec_id_from_u8, BlockExecContext, ExecError,
         ExecPath, FeeBreakdown,
     };
-    use op_revm::OpSpecId;
+    use op_revm::{OpHaltReason as RevmOpHaltReason, OpSpecId};
     use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+    use revm::context_interface::result::{HaltReason, OutOfGasError};
     use revm::context::TxEnv;
     use evm_db::chain_data::{L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, TxId, TxKind};
+    use super::{map_halt_reason, OpHaltReason};
 
     #[test]
     fn effective_price_uses_min_of_max_and_base_plus_priority() {
@@ -638,5 +721,22 @@ mod tests {
             b"setL1BlockValuesEcotone(uint32,uint32,uint64,uint64,uint64,uint256,uint256,bytes32,bytes32)",
         )[..4];
         assert_eq!(&data[..4], selector);
+    }
+
+    #[test]
+    fn halt_reason_mapping_covers_known_variants() {
+        assert_eq!(
+            map_halt_reason(RevmOpHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic))),
+            OpHaltReason::OutOfGas
+        );
+        assert_eq!(
+            map_halt_reason(RevmOpHaltReason::Base(HaltReason::InvalidJump)),
+            OpHaltReason::InvalidJump
+        );
+    }
+
+    #[test]
+    fn failed_deposit_halt_maps_to_unknown_bucket() {
+        assert_eq!(map_halt_reason(RevmOpHaltReason::FailedDeposit), OpHaltReason::Unknown);
     }
 }

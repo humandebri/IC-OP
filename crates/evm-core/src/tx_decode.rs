@@ -1,14 +1,19 @@
-//! どこで: Phase1のTxデコード / 何を: IcSynthetic + Eth raw tx の安全なデコード / なぜ: 互換性とtrap回避
+//! どこで: Phase1のTxデコード / 何を: IcSynthetic + Eth/OpDeposit の安全なデコード / なぜ: 互換性とtrap回避
 
+use crate::tx_decode_deposit::decode_op_deposit;
 use alloy_consensus::transaction::SignerRecoverable;
-use alloy_consensus::{Transaction, TxEnvelope, TxType};
+use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::{Decodable2718, Eip2718Error};
+use alloy_eips::Typed2718;
+use alloy_eips::eip7702::SignedAuthorization as AlloySignedAuthorization;
 use alloy_primitives::{Address as AlloyAddress, TxKind as AlloyTxKind, B256, U256 as AlloyU256};
 use evm_db::chain_data::constants::{CHAIN_ID, MAX_TX_SIZE};
 use evm_db::chain_data::TxKind;
 use revm::context::TxEnv;
+use revm::context_interface::either::Either;
 use revm::primitives::{
-    Address as RevmAddress, Bytes as RevmBytes, TxKind as RevmTxKind, U256 as RevmU256,
+    Address as RevmAddress, B256 as RevmB256, Bytes as RevmBytes, TxKind as RevmTxKind,
+    U256 as RevmU256,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,9 +22,24 @@ pub enum DecodeError {
     InvalidVersion,
     DataTooLarge,
     UnsupportedType,
+    LegacyChainIdMissing,
+    WrongChainId,
     InvalidSignature,
     InvalidRlp,
     TrailingBytes,
+    DepositInvalid(DepositInvalidReason),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DepositInvalidReason {
+    VersionMismatch,
+    LengthMismatch,
+    SourceHashZero,
+    BadToFlag,
+    BadIsSystemFlag,
+    DataTooLarge,
+    MintTooLargeForOpRevm,
+    OpRevmValidationFailed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,8 +54,10 @@ struct DecodedTx {
     max_fee_per_gas: Option<u128>,
     max_priority_fee_per_gas: Option<u128>,
     chain_id: Option<u64>,
-    tx_hash: [u8; 32],
     tx_type: u8,
+    blob_hashes: Vec<B256>,
+    max_fee_per_blob_gas: Option<u128>,
+    authorization_list: Vec<AlloySignedAuthorization>,
 }
 
 // IcSynthetic v2: [version:1][to:20][value:32][gas_limit:8][nonce:8]
@@ -105,7 +127,7 @@ pub fn decode_tx(kind: TxKind, caller: RevmAddress, bytes: &[u8]) -> Result<TxEn
     match kind {
         TxKind::IcSynthetic => decode_ic_synthetic(caller, bytes),
         TxKind::EthSigned => decode_eth_raw_tx(bytes),
-        TxKind::OpDeposit => Err(DecodeError::UnsupportedType),
+        TxKind::OpDeposit => decode_op_deposit(bytes),
     }
 }
 
@@ -126,45 +148,27 @@ pub fn decode_tx_view(
     caller: [u8; 20],
     bytes: &[u8],
 ) -> Result<DecodedTxView, DecodeError> {
-    match kind {
-        TxKind::EthSigned => {
-            let decoded = decode_eth_raw_tx_to_decoded(bytes)?;
-            Ok(DecodedTxView {
-                from: address_to_array(decoded.from),
-                to: decoded.to.map(address_to_array),
-                nonce: decoded.nonce,
-                value: decoded.value.to_be_bytes(),
-                input: decoded.input,
-                gas_limit: decoded.gas_limit,
-                gas_price: decoded.gas_price.or(decoded.max_fee_per_gas).unwrap_or(0),
-                chain_id: decoded.chain_id,
-            })
+    let tx_env = decode_tx(kind, RevmAddress::from(caller), bytes)?;
+    let to = match tx_env.kind {
+        RevmTxKind::Call(addr) => {
+            let mut out = [0u8; 20];
+            out.copy_from_slice(addr.as_ref());
+            Some(out)
         }
-        TxKind::IcSynthetic => {
-            let tx_env = decode_ic_synthetic(RevmAddress::from(caller), bytes)?;
-            let to = match tx_env.kind {
-                RevmTxKind::Call(addr) => {
-                    let mut out = [0u8; 20];
-                    out.copy_from_slice(addr.as_ref());
-                    Some(out)
-                }
-                RevmTxKind::Create => None,
-            };
-            let mut from = [0u8; 20];
-            from.copy_from_slice(tx_env.caller.as_ref());
-            Ok(DecodedTxView {
-                from,
-                to,
-                nonce: tx_env.nonce,
-                value: tx_env.value.to_be_bytes(),
-                input: tx_env.data.to_vec(),
-                gas_limit: tx_env.gas_limit,
-                gas_price: tx_env.gas_price,
-                chain_id: tx_env.chain_id,
-            })
-        }
-        TxKind::OpDeposit => Err(DecodeError::UnsupportedType),
-    }
+        RevmTxKind::Create => None,
+    };
+    let mut from = [0u8; 20];
+    from.copy_from_slice(tx_env.caller.as_ref());
+    Ok(DecodedTxView {
+        from,
+        to,
+        nonce: tx_env.nonce,
+        value: tx_env.value.to_be_bytes(),
+        input: tx_env.data.to_vec(),
+        gas_limit: tx_env.gas_limit,
+        gas_price: tx_env.gas_price,
+        chain_id: tx_env.chain_id,
+    })
 }
 
 pub fn decode_eth_raw_tx(bytes: &[u8]) -> Result<TxEnv, DecodeError> {
@@ -179,48 +183,40 @@ fn decode_eth_raw_tx_to_decoded(bytes: &[u8]) -> Result<DecodedTx, DecodeError> 
     if bytes.len() > MAX_TX_SIZE {
         return Err(DecodeError::DataTooLarge);
     }
+
     let envelope = TxEnvelope::decode_2718_exact(bytes).map_err(map_eip2718_error)?;
+
+    match envelope.chain_id() {
+        None => return Err(DecodeError::LegacyChainIdMissing),
+        Some(chain_id) if chain_id != CHAIN_ID => return Err(DecodeError::WrongChainId),
+        _ => {}
+    }
+
     let sender = envelope
         .recover_signer()
         .map_err(|_| DecodeError::InvalidSignature)?;
-    let tx_hash = *envelope.tx_hash();
 
     match envelope {
-        TxEnvelope::Legacy(tx) => Ok(decoded_from_tx(
-            tx.tx(),
-            sender,
-            tx_hash,
-            TxType::Legacy as u8,
-        )),
-        TxEnvelope::Eip2930(tx) => Ok(decoded_from_tx(
-            tx.tx(),
-            sender,
-            tx_hash,
-            TxType::Eip2930 as u8,
-        )),
-        TxEnvelope::Eip1559(tx) => Ok(decoded_from_tx(
-            tx.tx(),
-            sender,
-            tx_hash,
-            TxType::Eip1559 as u8,
-        )),
-        TxEnvelope::Eip4844(_) | TxEnvelope::Eip7702(_) => Err(DecodeError::UnsupportedType),
+        TxEnvelope::Legacy(tx) => Ok(decoded_from_tx(tx.tx(), sender, tx.ty())),
+        TxEnvelope::Eip2930(tx) => Ok(decoded_from_tx(tx.tx(), sender, tx.ty())),
+        TxEnvelope::Eip1559(tx) => Ok(decoded_from_tx(tx.tx(), sender, tx.ty())),
+        TxEnvelope::Eip4844(tx) => Ok(decoded_from_tx(tx.tx(), sender, tx.ty())),
+        TxEnvelope::Eip7702(tx) => Ok(decoded_from_tx(tx.tx(), sender, tx.ty())),
     }
 }
 
-fn decoded_from_tx<T: Transaction>(
-    tx: &T,
-    from: AlloyAddress,
-    tx_hash: B256,
-    tx_type: u8,
-) -> DecodedTx {
+fn decoded_from_tx<T: Transaction>(tx: &T, from: AlloyAddress, tx_type: u8) -> DecodedTx {
     let to = match tx.kind() {
         AlloyTxKind::Call(addr) => Some(addr),
         AlloyTxKind::Create => None,
     };
     let is_dynamic_fee = tx.is_dynamic_fee();
     let gas_price = if is_dynamic_fee { None } else { tx.gas_price() };
-    let max_fee_per_gas = if is_dynamic_fee { Some(tx.max_fee_per_gas()) } else { None };
+    let max_fee_per_gas = if is_dynamic_fee {
+        Some(tx.max_fee_per_gas())
+    } else {
+        None
+    };
     let max_priority_fee_per_gas = if is_dynamic_fee {
         tx.max_priority_fee_per_gas()
     } else {
@@ -237,8 +233,16 @@ fn decoded_from_tx<T: Transaction>(
         max_fee_per_gas,
         max_priority_fee_per_gas,
         chain_id: tx.chain_id().map(|id| id),
-        tx_hash: tx_hash.0,
         tx_type,
+        blob_hashes: tx
+            .blob_versioned_hashes()
+            .map(|hashes| hashes.to_vec())
+            .unwrap_or_default(),
+        max_fee_per_blob_gas: tx.max_fee_per_blob_gas(),
+        authorization_list: tx
+            .authorization_list()
+            .map(|list| list.to_vec())
+            .unwrap_or_default(),
     }
 }
 
@@ -260,9 +264,18 @@ fn decoded_to_tx_env(decoded: &DecodedTx) -> TxEnv {
         chain_id: decoded.chain_id,
         access_list: Default::default(),
         gas_priority_fee,
-        blob_hashes: Default::default(),
-        max_fee_per_blob_gas: 0,
-        authorization_list: Default::default(),
+        blob_hashes: decoded
+            .blob_hashes
+            .iter()
+            .map(|hash| revm_b256_from_alloy(*hash))
+            .collect(),
+        max_fee_per_blob_gas: decoded.max_fee_per_blob_gas.unwrap_or(0),
+        authorization_list: decoded
+            .authorization_list
+            .iter()
+            .cloned()
+            .map(Either::Left)
+            .collect(),
         tx_type: decoded.tx_type,
     }
 }
@@ -280,8 +293,6 @@ fn revm_address_from_alloy(addr: AlloyAddress) -> RevmAddress {
     RevmAddress::from_slice(addr.as_slice())
 }
 
-fn address_to_array(addr: AlloyAddress) -> [u8; 20] {
-    let mut out = [0u8; 20];
-    out.copy_from_slice(addr.as_slice());
-    out
+fn revm_b256_from_alloy(value: B256) -> RevmB256 {
+    RevmB256::from_slice(value.as_slice())
 }

@@ -10,5 +10,6 @@ pub mod state_root;
 pub mod revm_db;
 pub mod revm_exec;
 pub mod tx_decode;
+pub(crate) mod tx_decode_deposit;
 pub mod tx_submit;
 pub mod export;

@@ -37,10 +37,10 @@
 
 ## PR2: decodeをライブラリ委譲
 
-- [ ] Eth decodeをalloy系API中心に寄せる（legacy/2930/1559/4844/7702）
-- [ ] Deposit decode/検証はop-revmロジックへ寄せる（source hash等）
-- [ ] 自前のRLP境界処理・type判定を削減
-- [ ] 失敗理由（invalid rlp/bad sig/wrong chain id等）を一貫分類にする
+- [x] Eth decodeをalloy系API中心に寄せる（legacy/2930/1559/4844/7702）
+- [x] Deposit decode/検証はop-revmロジックへ寄せる（source hash等）
+- [x] 自前のRLP境界処理・type判定を削減
+- [x] 失敗理由（invalid rlp/bad sig/wrong chain id等）を一貫分類にする
 
 対象ファイル（主）:
 - `crates/evm-core/src/tx_decode.rs`

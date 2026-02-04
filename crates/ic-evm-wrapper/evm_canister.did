@@ -231,7 +231,6 @@ type SubmitTxError = variant {
 type TxKindView = variant { OpDeposit; EthSigned; IcSynthetic };
 service : (opt InitArgs) -> {
   execute_eth_raw_tx : (blob) -> (Result);
-  execute_ic_tx : (blob) -> (Result);
   expected_nonce_by_address : (blob) -> (Result_1) query;
   export_blocks : (opt ExportCursorView, nat32) -> (Result_2) query;
   get_block : (nat64) -> (Result_3) query;
@@ -253,10 +252,10 @@ service : (opt InitArgs) -> {
   rpc_eth_get_transaction_by_hash : (blob) -> (opt EthTxView) query;
   rpc_eth_get_transaction_receipt : (blob) -> (opt EthReceiptView) query;
   rpc_eth_send_raw_transaction : (blob) -> (Result_7);
-  set_auto_mine : (bool) -> ();
+  set_auto_mine : (bool) -> (Result_8);
   set_l1_block_info_params : (L1BlockInfoParamsView) -> (Result_8);
   set_l1_block_info_snapshot : (L1BlockInfoSnapshotView) -> (Result_8);
-  set_mining_interval_ms : (nat64) -> ();
+  set_mining_interval_ms : (nat64) -> (Result_8);
   set_ops_config : (OpsConfigView) -> (Result_8);
   set_prune_policy : (PrunePolicyView) -> (Result_8);
   set_pruning_enabled : (bool) -> (Result_8);

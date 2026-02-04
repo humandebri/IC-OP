@@ -91,23 +91,50 @@ struct InitArgs {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
-enum ExecuteTxError {
+enum SubmitTxError {
     InvalidArgument(String),
     Rejected(String),
     Internal(String),
 }
 
-type ExecuteTxResult = Result<ExecResultDto, ExecuteTxError>;
+type SubmitTxResult = Result<Vec<u8>, SubmitTxError>;
 
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
-struct ExecResultDto {
-    tx_id: Vec<u8>,
-    block_number: u64,
-    tx_index: u32,
-    status: u8,
-    gas_used: u64,
-    return_data: Option<Vec<u8>>,
+enum ProduceBlockError {
+    Internal(String),
+    InvalidArgument(String),
 }
+
+#[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
+enum NoOpReason {
+    NoExecutableTx,
+    CycleCritical,
+    NeedsMigration,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
+enum ProduceBlockStatus {
+    Produced {
+        block_number: u64,
+        txs: u32,
+        gas_used: u64,
+        dropped: u32,
+    },
+    NoOp {
+        reason: NoOpReason,
+    },
+}
+
+type ProduceBlockResult = Result<ProduceBlockStatus, ProduceBlockError>;
+
+#[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
+struct PruneResultView {
+    did_work: bool,
+    remaining: u64,
+    pruned_before_block: Option<u64>,
+}
+
+type PruneBlocksResult = Result<PruneResultView, ProduceBlockError>;
 
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 struct LogView {
@@ -238,20 +265,31 @@ fn rpc_receipt_decode_is_backward_compatible() {
     let pic = PocketIc::new();
     let canister_id = install_canister(&pic);
     let tx_bytes = build_ic_tx_bytes([0x10u8; 20], 0);
-    let exec_bytes = call_update(
+    let submit_bytes = call_update(
         &pic,
         canister_id,
-        "execute_ic_tx",
-        Encode!(&tx_bytes).expect("encode execute"),
+        "submit_ic_tx",
+        Encode!(&tx_bytes).expect("encode submit"),
     );
-    let exec: ExecuteTxResult = Decode!(&exec_bytes, ExecuteTxResult).expect("decode execute");
-    let exec = exec.expect("execute ok");
+    let submit: SubmitTxResult = Decode!(&submit_bytes, SubmitTxResult).expect("decode submit");
+    let tx_id = submit.expect("submit ok");
+    let produce_bytes = call_update(
+        &pic,
+        canister_id,
+        "produce_block",
+        Encode!(&1u32).expect("encode produce"),
+    );
+    let produce: ProduceBlockResult = Decode!(&produce_bytes, ProduceBlockResult).expect("decode produce");
+    match produce.expect("produce result") {
+        ProduceBlockStatus::Produced { .. } => {}
+        ProduceBlockStatus::NoOp { reason } => panic!("unexpected no-op: {:?}", reason),
+    }
 
     let receipt_bytes = call_query(
         &pic,
         canister_id,
         "rpc_eth_get_transaction_receipt",
-        Encode!(&exec.tx_id).expect("encode receipt arg"),
+        Encode!(&tx_id).expect("encode receipt arg"),
     );
     let legacy: Option<EthReceiptView> =
         Decode!(&receipt_bytes, Option<EthReceiptView>).expect("decode legacy");
@@ -265,6 +303,45 @@ fn rpc_receipt_decode_is_backward_compatible() {
     assert_eq!(legacy.status, v2.status);
     assert_eq!(legacy.gas_used, v2.gas_used);
     assert_eq!(legacy.effective_gas_price, v2.effective_gas_price);
+}
+
+#[test]
+fn execute_ic_tx_is_removed_from_public_api() {
+    let pic = PocketIc::new();
+    let canister_id = install_canister(&pic);
+    let result = pic.update_call(
+        canister_id,
+        Principal::anonymous(),
+        "execute_ic_tx",
+        Encode!(&Vec::<u8>::new()).expect("encode"),
+    );
+    assert!(result.is_err(), "execute_ic_tx should be undefined");
+}
+
+#[test]
+fn prune_blocks_requires_controller() {
+    let pic = PocketIc::new();
+    let canister_id = install_canister(&pic);
+    let non_controller = Principal::self_authenticating(b"non-controller");
+    let out = pic
+        .update_call(
+            canister_id,
+            non_controller,
+            "prune_blocks",
+            Encode!(&1u64, &1u32).expect("encode prune"),
+        )
+        .unwrap_or_else(|err| panic!("update error: {err}"));
+    let result: PruneBlocksResult = Decode!(&out, PruneBlocksResult).expect("decode prune");
+    match result {
+        Ok(_) => panic!("anonymous caller must not prune"),
+        Err(ProduceBlockError::Internal(message)) => {
+            assert!(
+                message.contains("auth.controller_required"),
+                "unexpected message: {message}"
+            );
+        }
+        Err(other) => panic!("unexpected prune error: {other:?}"),
+    }
 }
 
 #[test]

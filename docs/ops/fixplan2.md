@@ -177,6 +177,10 @@
 - `crates/ic-evm-wrapper/src/lib.rs`
 - `crates/evm-core/src/tx_decode.rs`
 
+## 運用ポリシー追記（2026-02-04）
+
+- 公開APIから `execute_ic_tx` を削除し、書き込み導線は `submit_* + produce_block` に統一する。
+
 ## PR9: SIMD性能PR（最後に分離）
 
 - [ ] wasm32向け `+simd128` 有効プロファイルを追加

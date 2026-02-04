@@ -12,6 +12,10 @@ pub const MAX_TXS_PER_BLOCK: usize = 1024;
 pub const MAX_TXS_PER_BLOCK_U32: u32 = 1024;
 pub const CHAIN_ID: u64 = 4_801_360;
 pub const READY_CANDIDATE_LIMIT: usize = 256;
+pub const MAX_QUEUE_SNAPSHOT_LIMIT: usize = 1_000;
+pub const MAX_PENDING_GLOBAL: usize = 20_000;
+pub const MAX_PENDING_PER_SENDER: usize = 64;
+pub const MAX_NONCE_WINDOW: u64 = 64;
 
 pub const RECEIPT_CONTRACT_ADDR_LEN: usize = 20;
 pub const RECEIPT_CONTRACT_ADDR_LEN_U32: u32 = 20;

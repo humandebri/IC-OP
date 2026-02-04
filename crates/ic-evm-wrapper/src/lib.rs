@@ -1,8 +1,11 @@
-//! どこで: canister入口 / 何を: Phase1のAPI公開 / なぜ: ICPから同期Tx実行を提供するため
+//! どこで: canister入口 / 何を: Phase1のAPI公開 / なぜ: submit中心の安全な運用導線を提供するため
 
 use candid::CandidType;
-use ic_cdk::api::{canister_cycle_balance, debug_print, is_controller, msg_caller, time};
-use evm_db::chain_data::constants::MAX_RETURN_DATA;
+use ic_cdk::api::{
+    accept_message, canister_cycle_balance, debug_print, is_controller,
+    msg_caller, msg_method_name, time,
+};
+use evm_db::chain_data::constants::{MAX_QUEUE_SNAPSHOT_LIMIT, MAX_RETURN_DATA, MAX_TX_SIZE};
 use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::{
     BlockData, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, OpsConfigV1, OpsMode, ReceiptLike, StoredTx, StoredTxBytes,
@@ -408,22 +411,51 @@ fn pre_upgrade() {
     upgrade::pre_upgrade();
 }
 
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = msg_method_name();
+    if !inspect_method_allowed(method.as_str()) {
+        return;
+    }
+    let payload_len = inspect_payload_len();
+    if payload_len <= MAX_TX_SIZE.saturating_mul(2) {
+        accept_message();
+    }
+}
+
+fn inspect_method_allowed(method: &str) -> bool {
+    if cfg!(feature = "dev-faucet") && method == "dev_mint" {
+        return true;
+    }
+    matches!(
+        method,
+        "submit_eth_tx"
+            | "submit_ic_tx"
+            | "rpc_eth_send_raw_transaction"
+            | "execute_eth_raw_tx"
+            | "set_auto_mine"
+            | "set_mining_interval_ms"
+            | "set_prune_policy"
+            | "set_pruning_enabled"
+            | "set_ops_config"
+            | "set_l1_block_info_params"
+            | "set_l1_block_info_snapshot"
+            | "prune_blocks"
+            | "produce_block"
+    )
+}
+
+#[allow(deprecated)]
+fn inspect_payload_len() -> usize {
+    ic_cdk::api::call::arg_data_raw_size()
+}
+
 #[ic_cdk::update]
 fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
     if let Some(reason) = reject_write_reason() {
         return Err(ExecuteTxError::Rejected(reason));
     }
     map_execute_chain_result(chain::execute_eth_raw_tx(raw_tx))
-}
-
-#[ic_cdk::update]
-fn execute_ic_tx(tx_bytes: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(ExecuteTxError::Rejected(reason));
-    }
-    let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
-    let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
-    map_execute_chain_result(chain::execute_ic_tx(caller_principal, canister_id, tx_bytes))
 }
 
 fn map_execute_chain_result(
@@ -451,6 +483,12 @@ fn map_execute_chain_result(
         }
         Err(chain::ChainError::NonceConflict) => {
             return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
+        }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(ExecuteTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(ExecuteTxError::Rejected("sender queue full".to_string()));
         }
         Err(chain::ChainError::ExecFailed(err)) => {
             let code = exec_error_to_code(err.as_ref());
@@ -502,6 +540,12 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
         }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(SubmitTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(SubmitTxError::Rejected("sender queue full".to_string()));
+        }
         Err(err) => {
             debug_print(format!("submit_eth_tx err: {:?}", err));
             return Err(SubmitTxError::Internal(format!("{:?}", err)));
@@ -547,6 +591,12 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         }
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
+        }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(SubmitTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
             debug_print(format!("submit_ic_tx err: {:?}", err));
@@ -736,9 +786,7 @@ fn rpc_eth_block_number() -> u64 {
 
 #[ic_cdk::update]
 fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(reason);
-    }
+    require_manage_write()?;
     let core_policy = evm_db::chain_data::PrunePolicy {
         target_bytes: policy.target_bytes,
         retain_days: policy.retain_days,
@@ -755,9 +803,7 @@ fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
 
 #[ic_cdk::update]
 fn set_pruning_enabled(enabled: bool) -> Result<(), String> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(reason);
-    }
+    require_manage_write()?;
     chain::set_pruning_enabled(enabled).map_err(|_| "set_pruning_enabled failed".to_string())?;
     schedule_prune();
     Ok(())
@@ -849,6 +895,12 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
         }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(SubmitTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(SubmitTxError::Rejected("sender queue full".to_string()));
+        }
         Err(err) => {
             debug_print(format!("rpc_eth_send_raw_transaction err: {:?}", err));
             return Err(SubmitTxError::Internal(format!("{:?}", err)));
@@ -888,12 +940,12 @@ fn get_ops_status() -> OpsStatusView {
 
 #[ic_cdk::update]
 fn set_ops_config(config: OpsConfigView) -> Result<(), String> {
-    require_controller()?;
+    require_manage_write()?;
     if config.critical == 0 {
-        return Err("critical must be > 0".to_string());
+        return Err("input.ops_config.critical.non_positive".to_string());
     }
     if config.critical >= config.low_watermark {
-        return Err("critical must be less than low_watermark".to_string());
+        return Err("input.ops_config.critical.gte_low_watermark".to_string());
     }
     evm_db::stable_state::with_state_mut(|state| {
         let _ = state.ops_config.set(OpsConfigV1 {
@@ -918,12 +970,9 @@ fn get_l1_block_info_snapshot() -> L1BlockInfoSnapshotView {
 
 #[ic_cdk::update]
 fn set_l1_block_info_params(params: L1BlockInfoParamsView) -> Result<(), String> {
-    require_controller()?;
-    if let Some(reason) = reject_write_reason() {
-        return Err(reason);
-    }
+    require_manage_write()?;
     if !is_valid_l1_spec_id(params.spec_id) {
-        return Err("invalid spec_id".to_string());
+        return Err("input.l1_spec.invalid".to_string());
     }
     let next = l1_params_from_view(params);
     evm_db::stable_state::with_state_mut(|state| {
@@ -934,13 +983,10 @@ fn set_l1_block_info_params(params: L1BlockInfoParamsView) -> Result<(), String>
 
 #[ic_cdk::update]
 fn set_l1_block_info_snapshot(snapshot: L1BlockInfoSnapshotView) -> Result<(), String> {
-    require_controller()?;
-    if let Some(reason) = reject_write_reason() {
-        return Err(reason);
-    }
+    require_manage_write()?;
     let producing = with_state(|state| state.chain_state.get().is_producing);
     if producing {
-        return Err("BusyProducing".to_string());
+        return Err("ops.busy_producing".to_string());
     }
     let next = l1_snapshot_from_view(snapshot);
     evm_db::stable_state::with_state_mut(|state| {
@@ -1013,10 +1059,8 @@ fn metrics(window: u64) -> MetricsView {
 }
 
 #[ic_cdk::update]
-fn set_auto_mine(enabled: bool) {
-    if reject_write_reason().is_some() {
-        return;
-    }
+fn set_auto_mine(enabled: bool) -> Result<(), String> {
+    require_manage_write()?;
     evm_db::stable_state::with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
         chain_state.auto_mine_enabled = enabled;
@@ -1025,15 +1069,14 @@ fn set_auto_mine(enabled: bool) {
     if enabled {
         schedule_mining();
     }
+    Ok(())
 }
 
 #[ic_cdk::update]
-fn set_mining_interval_ms(interval_ms: u64) {
-    if reject_write_reason().is_some() {
-        return;
-    }
+fn set_mining_interval_ms(interval_ms: u64) -> Result<(), String> {
+    require_manage_write()?;
     if interval_ms == 0 {
-        ic_cdk::trap("mining interval must be > 0");
+        return Err("input.mining_interval.non_positive".to_string());
     }
     evm_db::stable_state::with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
@@ -1041,11 +1084,12 @@ fn set_mining_interval_ms(interval_ms: u64) {
         state.chain_state.set(chain_state);
     });
     schedule_mining();
+    Ok(())
 }
 
 #[ic_cdk::update]
 fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResultView, ProduceBlockError> {
-    if let Some(reason) = reject_write_reason() {
+    if let Err(reason) = require_manage_write() {
         return Err(ProduceBlockError::Internal(reason));
     }
     match chain::prune_blocks(retain, max_ops) {
@@ -1364,7 +1408,15 @@ fn is_valid_l1_spec_id(spec_id: u8) -> bool {
 fn require_controller() -> Result<(), String> {
     let caller = msg_caller();
     if !is_controller(&caller) {
-        return Err("caller is not a controller".to_string());
+        return Err("auth.controller_required".to_string());
+    }
+    Ok(())
+}
+
+fn require_manage_write() -> Result<(), String> {
+    require_controller()?;
+    if let Some(reason) = reject_write_reason() {
+        return Err(reason);
     }
     Ok(())
 }
@@ -1411,10 +1463,10 @@ fn cycle_mode() -> OpsMode {
 
 fn reject_write_reason() -> Option<String> {
     if migration_pending() {
-        return Some("canister needs migration".to_string());
+        return Some("ops.write.needs_migration".to_string());
     }
     if cycle_mode() == OpsMode::Critical {
-        return Some("cycle critical: write operations are paused".to_string());
+        return Some("ops.write.cycle_critical".to_string());
     }
     None
 }
@@ -1557,7 +1609,7 @@ fn mining_tick() {
 
 #[ic_cdk::query]
 fn get_queue_snapshot(limit: u32, cursor: Option<u64>) -> QueueSnapshotView {
-    let limit = usize::try_from(limit).unwrap_or(0);
+    let limit = usize::try_from(limit).unwrap_or(0).min(MAX_QUEUE_SNAPSHOT_LIMIT);
     let snapshot = chain::get_queue_snapshot(limit, cursor);
     let mut items = Vec::with_capacity(snapshot.items.len());
     for item in snapshot.items.into_iter() {
@@ -1583,8 +1635,8 @@ pub fn export_did() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_return_data, exec_error_to_code, is_valid_l1_spec_id, map_execute_chain_result,
-        tx_id_from_bytes, ExecuteTxError,
+        clamp_return_data, exec_error_to_code, inspect_method_allowed, is_valid_l1_spec_id,
+        map_execute_chain_result, tx_id_from_bytes, ExecuteTxError,
     };
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
     use evm_db::chain_data::TxId;
@@ -1696,6 +1748,23 @@ mod tests {
             ExecuteTxError::Rejected(code) => assert_eq!(code, "exec.revert"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn inspect_allowlist_accepts_known_methods() {
+        assert!(inspect_method_allowed("submit_ic_tx"));
+        assert!(inspect_method_allowed("set_pruning_enabled"));
+    }
+
+    #[test]
+    fn inspect_allowlist_rejects_unknown_methods() {
+        assert!(!inspect_method_allowed("unknown_method"));
+    }
+
+    #[cfg(feature = "dev-faucet")]
+    #[test]
+    fn inspect_allowlist_accepts_dev_mint_with_feature() {
+        assert!(inspect_method_allowed("dev_mint"));
     }
 
     fn is_exec_code(value: &str) -> bool {

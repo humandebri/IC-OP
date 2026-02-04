@@ -11,7 +11,8 @@ use crate::tx_submit;
 use crate::tx_decode::decode_tx;
 use evm_db::chain_data::constants::{
     DEFAULT_BLOCK_GAS_LIMIT, DROP_CODE_CALLER_MISSING, DROP_CODE_DECODE, DROP_CODE_MISSING,
-    DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_TX_SIZE, READY_CANDIDATE_LIMIT,
+    DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_REPLACED, MAX_PENDING_GLOBAL,
+    MAX_PENDING_PER_SENDER, MAX_TX_SIZE, READY_CANDIDATE_LIMIT,
 };
 use evm_db::chain_data::{
     BlockData, Head, PruneJournal, PrunePolicy, ReceiptLike, ReadyKey, SenderKey,
@@ -39,6 +40,8 @@ pub enum ChainError {
     NonceTooLow,
     NonceGap,
     NonceConflict,
+    QueueFull,
+    SenderQueueFull,
     ExecFailed(Option<ExecError>),
     InvariantViolation(String),
     NoExecutableTx,
@@ -314,7 +317,11 @@ pub fn submit_tx(kind: TxKind, tx_bytes: Vec<u8>) -> Result<TxId, ChainError> {
         )
         .ok_or(ChainError::InvalidFee)?;
         let sender_key = SenderKey::new(address_to_bytes(tx_env.caller));
-        apply_nonce_and_replacement(state, sender_key, tx_env.nonce, effective_gas_price, base_fee)?;
+        let replaced =
+            apply_nonce_and_replacement(state, sender_key, tx_env.nonce, effective_gas_price, base_fee)?;
+        if replaced.is_none() {
+            enforce_pending_caps(state, sender_key)?;
+        }
         state.seen_tx.insert(tx_id, 1);
         state.tx_store.insert(tx_id, envelope);
         state.pending_current_by_sender.insert(sender_key, tx_id);
@@ -397,7 +404,11 @@ pub fn submit_ic_tx(
             base_fee,
         )
         .ok_or(ChainError::InvalidFee)?;
-        apply_nonce_and_replacement(state, sender_key, tx_env.nonce, effective_gas_price, base_fee)?;
+        let replaced =
+            apply_nonce_and_replacement(state, sender_key, tx_env.nonce, effective_gas_price, base_fee)?;
+        if replaced.is_none() {
+            enforce_pending_caps(state, sender_key)?;
+        }
         state.seen_tx.insert(tx_id, 1);
         state.tx_store.insert(tx_id, envelope);
         state.pending_current_by_sender.insert(sender_key, tx_id);
@@ -605,7 +616,7 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         let prepared_tx = match item {
             PreparedItem::Drop(drop) => {
                 with_state_mut(|state| {
-                    state.tx_locs.insert(drop.tx_id, TxLoc::dropped(drop.drop_code));
+                    mark_dropped_and_purge_payload(state, drop.tx_id, drop.drop_code);
                     advance_sender_after_tx(
                         state,
                         drop.tx_id,
@@ -633,7 +644,9 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
             Err(err) => {
                 observe_exec_error(&err, timestamp);
                 if err == ExecError::InvalidGasFee {
-                    with_state_mut(|state| state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_INVALID_FEE)));
+                    with_state_mut(|state| {
+                        mark_dropped_and_purge_payload(state, tx_id, DROP_CODE_INVALID_FEE)
+                    });
                     track_drop(&mut dropped_total, &mut dropped_by_code, DROP_CODE_INVALID_FEE);
                     with_state_mut(|state| {
                         advance_sender_after_tx(
@@ -1339,6 +1352,32 @@ fn promote_if_next_nonce(
     Ok(())
 }
 
+fn enforce_pending_caps(
+    state: &evm_db::stable_state::StableState,
+    sender: SenderKey,
+) -> Result<(), ChainError> {
+    if state.pending_by_sender_nonce.len() >= MAX_PENDING_GLOBAL as u64 {
+        return Err(ChainError::QueueFull);
+    }
+    if count_pending_for_sender(state, sender) >= MAX_PENDING_PER_SENDER {
+        return Err(ChainError::SenderQueueFull);
+    }
+    Ok(())
+}
+
+fn count_pending_for_sender(state: &evm_db::stable_state::StableState, sender: SenderKey) -> usize {
+    let mut count = 0usize;
+    let start = SenderNonceKey::new(sender.0, 0);
+    for entry in state.pending_by_sender_nonce.range(start..) {
+        let key = *entry.key();
+        if key.sender != sender {
+            break;
+        }
+        count = count.saturating_add(1);
+    }
+    count
+}
+
 fn insert_ready(
     state: &mut evm_db::stable_state::StableState,
     tx_id: TxId,
@@ -1421,7 +1460,7 @@ fn drop_invalid_fee_pending(
     dropped_by_code: Option<&mut [u64]>,
 ) {
     advance_sender_after_tx(state, tx_id, None, None);
-    state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_INVALID_FEE));
+    mark_dropped_and_purge_payload(state, tx_id, DROP_CODE_INVALID_FEE);
     if let (Some(total), Some(by_code)) = (dropped_total, dropped_by_code) {
         track_drop(total, by_code, DROP_CODE_INVALID_FEE);
     } else {
@@ -1438,7 +1477,7 @@ fn drop_invalid_fee_pending_decode(
     dropped_by_code: Option<&mut [u64]>,
 ) {
     advance_sender_after_tx(state, tx_id, None, None);
-    state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_DECODE));
+    mark_dropped_and_purge_payload(state, tx_id, DROP_CODE_DECODE);
     if let (Some(total), Some(by_code)) = (dropped_total, dropped_by_code) {
         track_drop(total, by_code, DROP_CODE_DECODE);
     } else {
@@ -1454,7 +1493,7 @@ fn drop_exec_pending(state: &mut evm_db::stable_state::StableState, tx_id: TxId,
         state.pending_by_sender_nonce.remove(&pending_key);
     }
     finalize_pending_for_sender(state, sender, tx_id);
-    state.tx_locs.insert(tx_id, TxLoc::dropped(DROP_CODE_EXEC));
+    mark_dropped_and_purge_payload(state, tx_id, DROP_CODE_EXEC);
     let mut metrics = *state.metrics_state.get();
     metrics.record_drop(DROP_CODE_EXEC, 1);
     state.metrics_state.set(metrics);
@@ -1510,7 +1549,7 @@ fn apply_nonce_and_replacement(
     nonce: u64,
     effective_gas_price: u64,
     base_fee: u64,
-) -> Result<(), ChainError> {
+) -> Result<Option<TxId>, ChainError> {
     let replaced = match tx_submit::apply_nonce_and_replacement(
         state,
         sender,
@@ -1526,7 +1565,7 @@ fn apply_nonce_and_replacement(
     if let Some(old_tx_id) = replaced {
         replace_pending_for_sender(state, sender, old_tx_id);
     }
-    Ok(())
+    Ok(replaced)
 }
 
 fn finalize_pending_for_sender(
@@ -1548,10 +1587,19 @@ fn replace_pending_for_sender(
     }
     state.pending_min_nonce.remove(&sender);
     state.pending_current_by_sender.remove(&sender);
-    state.tx_locs.insert(old_tx_id, TxLoc::dropped(DROP_CODE_REPLACED));
+    mark_dropped_and_purge_payload(state, old_tx_id, DROP_CODE_REPLACED);
     let mut metrics = *state.metrics_state.get();
     metrics.record_drop(DROP_CODE_REPLACED, 1);
     state.metrics_state.set(metrics);
+}
+
+fn mark_dropped_and_purge_payload(
+    state: &mut evm_db::stable_state::StableState,
+    tx_id: TxId,
+    drop_code: u16,
+) {
+    state.tx_store.remove(&tx_id);
+    state.tx_locs.insert(tx_id, TxLoc::dropped(drop_code));
 }
 
 fn min_fee_satisfied(

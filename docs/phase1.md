@@ -24,30 +24,15 @@ OP/ZK（Phase3+）
 logsの完全互換（receiptは最小でOK）
 
 1. 外部API（canister）
-1.1 update（同期実行を主役にするかどうか）
+1.1 update（submit中心に統一する）
 
 Phase1でどっちを採るかを明確化しておくのが重要です。
 
-A案（推奨）：execute_* をPhase1で入れる（ICPから呼ぶ価値がすぐ出る）
-
-execute_ic_tx(to, data, value, gas_limit?, nonce?) -> ExecResult
-
-execute_eth_raw_tx(raw_tx: blob) -> ExecResult
-
-ExecResult（最小返却）
-- tx_id
-- block_number
-- tx_index
-- status
-- gas_used
-- return_data（大きい場合は None）
-
-挙動：内部で「1txブロック」を作る
-enqueue → run tx → commit → root → block保存 → receipt返す
-
-B案（保守）：submit_* + produce_block だけ（同期体験はPhase2.5で）
+A案（採用）：submit_* + produce_block だけ（同期即時レーンを廃止）
 
 submit_eth_tx(raw_tx) -> tx_id
+submit_ic_tx(tx_bytes) -> tx_id
+produce_block(max_txs) -> ProduceBlockStatus
 
 submit_ic_tx(...) -> tx_id
 
@@ -278,11 +263,7 @@ REVM実行revert：ブロックに含める＋status=0（EVM的）
 
 9.4 canister API
 
- execute_ic_tx（推奨）
-
- execute_eth_raw_tx（推奨）
-
- submit_* + produce_block（バッチ用）
+ submit_* + produce_block（唯一の標準書き込み導線）
 
  query get_block/get_receipt/eth_call_like
 
@@ -327,7 +308,8 @@ max_tx_size / max_gas_per_tx / max_code_size が効く
 
 手動スモーク（dfx）:
 - dfx start --clean --background
-- dfx deploy
+- source scripts/lib_init_args.sh && INIT_ARGS="$(build_init_args_for_current_identity 1000000000000000000)"
+- dfx canister install <canister> --mode reinstall --wasm target/wasm32-unknown-unknown/release/ic_evm_wrapper.candid.wasm --argument "$INIT_ARGS"
 - dfx canister call <canister> dev_mint '(vec {0x11: nat8; ...}, 1000000000000:nat)' ※任意（controllerのみ）
 - dfx canister call <canister> submit_tx '(blob "<raw_eip2718_tx>")'
 - dfx canister call <canister> produce_block '(1:nat)'

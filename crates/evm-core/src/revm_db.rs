@@ -5,8 +5,8 @@ use evm_db::stable_state::with_state_mut;
 use evm_db::types::keys::{make_account_key, make_code_key, make_storage_key};
 use evm_db::types::values::{AccountVal, CodeVal, U256Val};
 use ic_stable_structures::Storable;
-use revm::database_interface::{Database, DatabaseCommit};
-use revm::primitives::{Address, B256, StorageKey, StorageValue, U256, KECCAK_EMPTY};
+use revm::database_interface::{Database, DatabaseCommit, DatabaseRef};
+use revm::primitives::{Address, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256};
 use revm::state::{Account, AccountInfo, Bytecode};
 use std::borrow::Cow;
 
@@ -40,7 +40,11 @@ impl Database for RevmStableDb {
         Ok(bytecode)
     }
 
-    fn storage(&mut self, address: Address, index: StorageKey) -> Result<StorageValue, Self::Error> {
+    fn storage(
+        &mut self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
         let addr = address_to_bytes(address);
         let slot = u256_to_bytes(index);
         let key = make_storage_key(addr, slot);
@@ -49,6 +53,58 @@ impl Database for RevmStableDb {
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        let hash = evm_db::stable_state::with_state(|state| {
+            if let Some(ptr) = state.blocks.get(&number) {
+                let bytes = state.blob_store.read(&ptr).ok()?;
+                let block = evm_db::chain_data::BlockData::from_bytes(Cow::Owned(bytes));
+                return Some(block.block_hash);
+            }
+            None
+        });
+        Ok(B256::from(hash.unwrap_or([0u8; 32])))
+    }
+}
+
+impl DatabaseRef for RevmStableDb {
+    type Error = core::convert::Infallible;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        let addr = address_to_bytes(address);
+        let key = make_account_key(addr);
+        let value = evm_db::stable_state::with_state(|state| state.accounts.get(&key));
+        let info = match value {
+            Some(account) => account_val_to_info(&account),
+            None => return Ok(None),
+        };
+        Ok(Some(info))
+    }
+
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        if code_hash == KECCAK_EMPTY {
+            return Ok(Bytecode::default());
+        }
+        let key = make_code_key(b256_to_bytes(code_hash));
+        let code = evm_db::stable_state::with_state(|state| state.codes.get(&key));
+        let bytecode = match code {
+            Some(CodeVal(bytes)) => Bytecode::new_legacy(bytes.into()),
+            None => Bytecode::default(),
+        };
+        Ok(bytecode)
+    }
+
+    fn storage_ref(
+        &self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
+        let addr = address_to_bytes(address);
+        let slot = u256_to_bytes(index);
+        let key = make_storage_key(addr, slot);
+        let value = evm_db::stable_state::with_state(|state| state.storage.get(&key));
+        Ok(value.map(u256_val_to_u256).unwrap_or(U256::ZERO))
+    }
+
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
         let hash = evm_db::stable_state::with_state(|state| {
             if let Some(ptr) = state.blocks.get(&number) {
                 let bytes = state.blob_store.read(&ptr).ok()?;
@@ -83,7 +139,9 @@ impl DatabaseCommit for RevmStableDb {
                     if present.is_zero() {
                         state.storage.remove(&storage_key);
                     } else {
-                        state.storage.insert(storage_key, U256Val(u256_to_bytes(present)));
+                        state
+                            .storage
+                            .insert(storage_key, U256Val(u256_to_bytes(present)));
                     }
                 }
 

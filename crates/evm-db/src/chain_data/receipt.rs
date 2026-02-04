@@ -7,16 +7,12 @@ use crate::chain_data::constants::{
 use crate::chain_data::tx::TxId;
 use crate::corrupt_log::record_corrupt;
 use crate::decode::{read_array, read_u32, read_u64, read_u8, read_vec};
+use alloy_primitives::{Address, B256, Bytes, Log, LogData};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogEntry {
-    pub address: [u8; 20],
-    pub topics: Vec<[u8; 32]>,
-    pub data: Vec<u8>,
-}
+pub type LogEntry = Log;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiptLike {
@@ -26,6 +22,9 @@ pub struct ReceiptLike {
     pub status: u8,
     pub gas_used: u64,
     pub effective_gas_price: u64,
+    pub l1_data_fee: u128,
+    pub operator_fee: u128,
+    pub total_fee: u128,
     pub return_data_hash: [u8; HASH_LEN],
     pub return_data: Vec<u8>,
     pub contract_address: Option<[u8; RECEIPT_CONTRACT_ADDR_LEN]>,
@@ -34,19 +33,26 @@ pub struct ReceiptLike {
 
 impl Storable for ReceiptLike {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
+        if self.status > 1 {
+            ic_cdk::trap("receipt: status must be 0 or 1");
+        }
         if self.return_data.len() > MAX_RETURN_DATA {
             ic_cdk::trap("receipt: return_data too large");
         }
         if self.logs.len() > MAX_LOGS_PER_TX {
             ic_cdk::trap("receipt: too many logs");
         }
-        let mut out = Vec::with_capacity(64);
+        let mut out = Vec::with_capacity(96);
+        out.extend_from_slice(&RECEIPT_V2_MAGIC);
         out.extend_from_slice(&self.tx_id.0);
         out.extend_from_slice(&self.block_number.to_be_bytes());
         out.extend_from_slice(&self.tx_index.to_be_bytes());
         out.push(self.status);
         out.extend_from_slice(&self.gas_used.to_be_bytes());
         out.extend_from_slice(&self.effective_gas_price.to_be_bytes());
+        out.extend_from_slice(&self.l1_data_fee.to_be_bytes());
+        out.extend_from_slice(&self.operator_fee.to_be_bytes());
+        out.extend_from_slice(&self.total_fee.to_be_bytes());
         out.extend_from_slice(&self.return_data_hash);
         let data_len = u32::try_from(self.return_data.len())
             .unwrap_or_else(|_| ic_cdk::trap("receipt: return_data len"));
@@ -66,23 +72,25 @@ impl Storable for ReceiptLike {
             .unwrap_or_else(|_| ic_cdk::trap("receipt: logs len"));
         out.extend_from_slice(&logs_len.to_be_bytes());
         for log in self.logs.iter() {
-            if log.topics.len() > MAX_LOG_TOPICS {
+            let topics = log.data.topics();
+            if topics.len() > MAX_LOG_TOPICS {
                 ic_cdk::trap("receipt: too many topics");
             }
-            if log.data.len() > MAX_LOG_DATA {
+            let data = log.data.data.as_ref();
+            if data.len() > MAX_LOG_DATA {
                 ic_cdk::trap("receipt: log data too large");
             }
-            out.extend_from_slice(&log.address);
-            let topics_len = u32::try_from(log.topics.len())
+            out.extend_from_slice(log.address.as_ref());
+            let topics_len = u32::try_from(topics.len())
                 .unwrap_or_else(|_| ic_cdk::trap("receipt: topics len"));
             out.extend_from_slice(&topics_len.to_be_bytes());
-            for topic in log.topics.iter() {
-                out.extend_from_slice(topic);
+            for topic in topics.iter() {
+                out.extend_from_slice(topic.as_ref());
             }
-            let data_len = u32::try_from(log.data.len())
+            let data_len = u32::try_from(data.len())
                 .unwrap_or_else(|_| ic_cdk::trap("receipt: log data len"));
             out.extend_from_slice(&data_len.to_be_bytes());
-            out.extend_from_slice(&log.data);
+            out.extend_from_slice(data);
         }
         Cow::Owned(out)
     }
@@ -97,6 +105,10 @@ impl Storable for ReceiptLike {
             return corrupt_receipt();
         }
         let mut offset = 0usize;
+        let is_v2 = data.starts_with(&RECEIPT_V2_MAGIC);
+        if is_v2 {
+            offset += RECEIPT_V2_MAGIC.len();
+        }
         let tx_id = match read_array::<32>(data, &mut offset) {
             Some(value) => value,
             None => return corrupt_receipt(),
@@ -113,6 +125,9 @@ impl Storable for ReceiptLike {
             Some(value) => value,
             None => return corrupt_receipt(),
         };
+        if status > 1 {
+            return corrupt_receipt();
+        }
         let gas_used = match read_u64(data, &mut offset) {
             Some(value) => value,
             None => return corrupt_receipt(),
@@ -120,6 +135,23 @@ impl Storable for ReceiptLike {
         let effective_gas_price = match read_u64(data, &mut offset) {
             Some(value) => value,
             None => return corrupt_receipt(),
+        };
+        let (l1_data_fee, operator_fee, total_fee) = if is_v2 {
+            let l1_data_fee = match read_array::<16>(data, &mut offset) {
+                Some(value) => u128::from_be_bytes(value),
+                None => return corrupt_receipt(),
+            };
+            let operator_fee = match read_array::<16>(data, &mut offset) {
+                Some(value) => u128::from_be_bytes(value),
+                None => return corrupt_receipt(),
+            };
+            let total_fee = match read_array::<16>(data, &mut offset) {
+                Some(value) => u128::from_be_bytes(value),
+                None => return corrupt_receipt(),
+            };
+            (l1_data_fee, operator_fee, total_fee)
+        } else {
+            (0u128, 0u128, 0u128)
         };
         let return_data_hash = match read_array::<32>(data, &mut offset) {
             Some(value) => value,
@@ -177,13 +209,13 @@ impl Storable for ReceiptLike {
             if topics_len_usize > MAX_LOG_TOPICS {
                 return corrupt_receipt();
             }
-            let mut topics = Vec::with_capacity(topics_len_usize);
+            let mut topics: Vec<B256> = Vec::with_capacity(topics_len_usize);
             for _ in 0..topics_len_usize {
                 let topic = match read_array::<32>(data, &mut offset) {
                     Some(value) => value,
                     None => return corrupt_receipt(),
                 };
-                topics.push(topic);
+                topics.push(B256::from(topic));
             }
             let data_len = match read_u32(data, &mut offset) {
                 Some(value) => value,
@@ -200,10 +232,14 @@ impl Storable for ReceiptLike {
                 Some(value) => value,
                 None => return corrupt_receipt(),
             };
+            let log_data = LogData::new(topics, Bytes::from(data));
+            let log_data = match log_data {
+                Some(value) => value,
+                None => return corrupt_receipt(),
+            };
             logs.push(LogEntry {
-                address,
-                topics,
-                data,
+                address: Address::from(address),
+                data: log_data,
             });
         }
         Self {
@@ -213,6 +249,9 @@ impl Storable for ReceiptLike {
             status,
             gas_used,
             effective_gas_price,
+            l1_data_fee,
+            operator_fee,
+            total_fee,
             return_data_hash,
             return_data,
             contract_address,
@@ -235,9 +274,14 @@ fn corrupt_receipt() -> ReceiptLike {
         status: 0,
         gas_used: 0,
         effective_gas_price: 0,
+        l1_data_fee: 0,
+        operator_fee: 0,
+        total_fee: 0,
         return_data_hash: [0u8; HASH_LEN],
         return_data: Vec::new(),
         contract_address: None,
         logs: Vec::new(),
     }
 }
+
+const RECEIPT_V2_MAGIC: [u8; 8] = *b"rcptv2\0\x02";

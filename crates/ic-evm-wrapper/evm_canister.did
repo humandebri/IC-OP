@@ -29,9 +29,12 @@ type EthBlockView = record {
 type EthReceiptView = record {
   effective_gas_price : nat64;
   status : nat8;
+  l1_data_fee : nat;
   tx_index : nat32;
   logs : vec LogView;
+  total_fee : nat;
   block_number : nat64;
+  operator_fee : nat;
   gas_used : nat64;
   contract_address : opt blob;
   tx_hash : blob;
@@ -46,19 +49,6 @@ type EthTxView = record {
   block_number : opt nat64;
   eth_tx_hash : opt blob;
   decoded : opt DecodedTxView;
-};
-type ExecResultDto = record {
-  status : nat8;
-  tx_id : blob;
-  tx_index : nat32;
-  return_data : opt blob;
-  block_number : nat64;
-  gas_used : nat64;
-};
-type ExecuteTxError = variant {
-  Internal : text;
-  Rejected : text;
-  InvalidArgument : text;
 };
 type ExportChunkView = record {
   start : nat32;
@@ -81,6 +71,7 @@ type ExportResponseView = record {
   next_cursor : opt ExportCursorView;
   chunks : vec ExportChunkView;
 };
+type GenesisBalanceView = record { address : blob; amount : nat };
 type HealthView = record {
   is_producing : bool;
   mining_scheduled : bool;
@@ -89,6 +80,22 @@ type HealthView = record {
   last_block_time : nat64;
   queue_len : nat64;
   auto_mine_enabled : bool;
+};
+type InitArgs = record { genesis_balances : vec GenesisBalanceView };
+type L1BlockInfoParamsView = record {
+  operator_fee_constant : nat;
+  l1_fee_overhead : nat;
+  operator_fee_scalar : nat;
+  l1_base_fee_scalar : nat;
+  spec_id : nat8;
+  l1_blob_base_fee_scalar : nat;
+  empty_ecotone_scalars : bool;
+};
+type L1BlockInfoSnapshotView = record {
+  l1_blob_base_fee : nat;
+  l1_block_number : nat64;
+  l1_base_fee : nat;
+  enabled : bool;
 };
 type LogView = record { data : blob; topics : vec blob; address : blob };
 type LookupError = variant {
@@ -113,21 +120,22 @@ type MetricsView = record {
   total_included : nat64;
   dev_faucet_enabled : bool;
 };
-type NoOpReason = variant { NoExecutableTx; CycleCritical; NeedsMigration };
+type NoOpReason = variant { CycleCritical; NoExecutableTx; NeedsMigration };
 type OpsConfigView = record {
   low_watermark : nat;
-  critical : nat;
   freeze_on_critical : bool;
+  critical : nat;
 };
-type OpsModeView = variant { Normal; Low; Critical };
+type OpsModeView = variant { Low; Normal; Critical };
 type OpsStatusView = record {
-  config : OpsConfigView;
-  last_cycle_balance : nat;
-  last_check_ts : nat64;
-  mode : OpsModeView;
-  safe_stop_latched : bool;
   needs_migration : bool;
+  last_cycle_balance : nat;
+  mode : OpsModeView;
+  last_check_ts : nat64;
   schema_version : nat32;
+  safe_stop_latched : bool;
+  l1_fee_fallback_count : nat64;
+  config : OpsConfigView;
 };
 type PendingStatusView = variant {
   Queued : record { seq : nat64 };
@@ -180,57 +188,61 @@ type QueueSnapshotView = record {
 type ReceiptView = record {
   effective_gas_price : nat64;
   status : nat8;
+  l1_data_fee : nat;
   tx_id : blob;
   tx_index : nat32;
   return_data_hash : blob;
   logs : vec LogView;
   return_data : opt blob;
+  total_fee : nat;
   block_number : nat64;
+  operator_fee : nat;
   gas_used : nat64;
   contract_address : opt blob;
 };
-type Result = variant { Ok : ExecResultDto; Err : ExecuteTxError };
-type Result_1 = variant { Ok : nat64; Err : text };
-type Result_2 = variant { Ok : ExportResponseView; Err : ExportErrorView };
-type Result_3 = variant { Ok : BlockView; Err : LookupError };
-type Result_4 = variant { Ok : ReceiptView; Err : LookupError };
-type Result_5 = variant { Ok : ProduceBlockStatus; Err : ProduceBlockError };
-type Result_6 = variant { Ok : PruneResultView; Err : ProduceBlockError };
-type Result_7 = variant { Ok : blob; Err : SubmitTxError };
-type Result_8 = variant { Ok; Err : text };
+type Result = variant { Ok : nat64; Err : text };
+type Result_1 = variant { Ok : ExportResponseView; Err : ExportErrorView };
+type Result_2 = variant { Ok : BlockView; Err : LookupError };
+type Result_3 = variant { Ok : ReceiptView; Err : LookupError };
+type Result_4 = variant { Ok : ProduceBlockStatus; Err : ProduceBlockError };
+type Result_5 = variant { Ok : PruneResultView; Err : ProduceBlockError };
+type Result_6 = variant { Ok : blob; Err : SubmitTxError };
+type Result_7 = variant { Ok; Err : text };
 type SubmitTxError = variant {
   Internal : text;
   Rejected : text;
   InvalidArgument : text;
 };
-type TxKindView = variant { EthSigned; IcSynthetic };
-service : () -> {
-  execute_eth_raw_tx : (blob) -> (Result);
-  execute_ic_tx : (blob) -> (Result);
-  expected_nonce_by_address : (blob) -> (Result_1) query;
-  export_blocks : (opt ExportCursorView, nat32) -> (Result_2) query;
-  get_block : (nat64) -> (Result_3) query;
+type TxKindView = variant { OpDeposit; EthSigned; IcSynthetic };
+service : (opt InitArgs) -> {
+  expected_nonce_by_address : (blob) -> (Result) query;
+  export_blocks : (opt ExportCursorView, nat32) -> (Result_1) query;
+  get_block : (nat64) -> (Result_2) query;
   get_cycle_balance : () -> (nat) query;
+  get_l1_block_info_params : () -> (L1BlockInfoParamsView) query;
+  get_l1_block_info_snapshot : () -> (L1BlockInfoSnapshotView) query;
   get_ops_status : () -> (OpsStatusView) query;
   get_pending : (blob) -> (PendingStatusView) query;
   get_prune_status : () -> (PruneStatusView) query;
   get_queue_snapshot : (nat32, opt nat64) -> (QueueSnapshotView) query;
-  get_receipt : (blob) -> (Result_4) query;
+  get_receipt : (blob) -> (Result_3) query;
   health : () -> (HealthView) query;
   metrics : (nat64) -> (MetricsView) query;
-  produce_block : (nat32) -> (Result_5);
-  prune_blocks : (nat64, nat32) -> (Result_6);
+  produce_block : (nat32) -> (Result_4);
+  prune_blocks : (nat64, nat32) -> (Result_5);
   rpc_eth_block_number : () -> (nat64) query;
   rpc_eth_chain_id : () -> (nat64) query;
   rpc_eth_get_block_by_number : (nat64, bool) -> (opt EthBlockView) query;
   rpc_eth_get_transaction_by_hash : (blob) -> (opt EthTxView) query;
   rpc_eth_get_transaction_receipt : (blob) -> (opt EthReceiptView) query;
-  rpc_eth_send_raw_transaction : (blob) -> (Result_7);
-  set_auto_mine : (bool) -> ();
-  set_mining_interval_ms : (nat64) -> ();
-  set_ops_config : (OpsConfigView) -> (Result_8);
-  set_prune_policy : (PrunePolicyView) -> (Result_8);
-  set_pruning_enabled : (bool) -> (Result_8);
-  submit_eth_tx : (blob) -> (Result_7);
-  submit_ic_tx : (blob) -> (Result_7);
+  rpc_eth_send_raw_transaction : (blob) -> (Result_6);
+  set_auto_mine : (bool) -> (Result_7);
+  set_l1_block_info_params : (L1BlockInfoParamsView) -> (Result_7);
+  set_l1_block_info_snapshot : (L1BlockInfoSnapshotView) -> (Result_7);
+  set_mining_interval_ms : (nat64) -> (Result_7);
+  set_ops_config : (OpsConfigView) -> (Result_7);
+  set_prune_policy : (PrunePolicyView) -> (Result_7);
+  set_pruning_enabled : (bool) -> (Result_7);
+  submit_eth_tx : (blob) -> (Result_6);
+  submit_ic_tx : (blob) -> (Result_6);
 }

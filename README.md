@@ -1,60 +1,239 @@
-# `evm`
+# EVM互換Canister開発プロジェクト計画書
 
-Welcome to your new `evm` project and to the Internet Computer development community. By default, creating a new project adds this README and some template files to your project directory. You can edit these template files to customize your project and to include your own code to speed up the development cycle.
+## 運用上の決定事項（2026-02-04）
 
-To get started, you might want to explore the project directory structure and the default configuration file. Working with this project in your development environment will not affect any production deployment or identity tokens.
+- InitArgs: Candidは service : (opt InitArgs) を維持するが、互換性維持目的であり runtime では None を拒否する。
+- OpDeposit: decode 実装はあるが submit API からの投入は未対応。
+- L1 snapshot: block number は `l1_block_number` を使用する（旧 `l2_block_number` は破壊的に廃止）。
+- submit系APIの役割:
 
-To learn more before you start working with `evm`, see the following documentation available online:
+  | API | 用途 | 同期性 | 戻り値 |
+  | --- | --- | --- | --- |
+  | submit_ic_tx | 後続ブロックで実行するためのキュー投入 | 非同期 | tx_id |
+  | submit_eth_tx | 後続ブロックで実行するためのキュー投入 | 非同期 | tx_id |
 
-- [Quick Start](https://internetcomputer.org/docs/current/developer-docs/setup/deploy-locally)
-- [SDK Developer Tools](https://internetcomputer.org/docs/current/developer-docs/setup/install)
-- [Rust Canister Development Guide](https://internetcomputer.org/docs/current/developer-docs/backend/rust/)
-- [ic-cdk](https://docs.rs/ic-cdk)
-- [Candid Introduction](https://internetcomputer.org/docs/building-apps/interact-with-canisters/candid/candid-concepts)
+## 1.0 序論：プロジェクトのビジョンと全体戦略
 
-If you want to start working on your project right away, you might want to try the following commands:
+本プロジェクトは、Internet Computer Protocol (ICP) の独自のアーキテクチャを最大限に活用し、高性能かつユニークなEVM（Ethereum Virtual Machine）互換環境をcanister上に構築することをビジョンとして掲げます。従来のLayer 2（L2）ソリューションが主にスケーラビリティに焦点を当てる中、我々はICPの特性である同期的な関数呼び出しやcanister間のシームレスな連携能力を活かし、「ICPから呼び出して嬉しいEVM」という新たな価値を提供することを目指します。このアプローチは、単なるEthereumの拡張ではなく、ICPエコシステムとEVMエコシステムの双方に新たな可能性をもたらす戦略的選択です。
+このビジョンを実現するため、プロジェクト全体を導く基本方針として以下の3点を定めます。
+- 同期的なトランザクション体験の提供 プロジェクトの核となる価値は、EVMトランザクションをICP caninsterからの「同期的な関数呼び出し」として扱える点にあります。これにより、開発者はトランザクションを送信した後、その場で即座に実行結果（成功、失敗、返り値）を受け取ることが可能になります。この体験は、従来の非同期的なトランザクションモデルとは一線を画し、ICP上のワークフローや他canisterとの連携にEVMのロジックをシームレスに組み込むことを可能にします。この「その場で結果が分かるEVM」こそが、本プロジェクトが提供する最も強力な差別化要因です。
+- RPCの戦略的ポジショニング 我々はHTTP JSON-RPCインターフェースを、敢えてEthereumノードの完全互換を目指すのではなく、「開発・デバッグ・外部ツール接続のための補助的なインターフェース」と位置づける戦略的判断を下します。このトレードオフにより、mempoolや複雑なフィルター機能といった実装負荷の高い仕様を意図的に後回しにし、開発リソースをプロジェクト独自の価値である同期実行体験の向上に集中させることができます。
+- 段階的なL2化 L1 Ethereumとの接続によるセキュリティ担保は、最終的な目標の一つですが、いきなり完全なOptimistic Rollupを目指すアプローチは取りません。代わりに、リスクと実装コストを管理しながら段階的にセキュリティを強化する現実的なロードマップを採用します。まずL1に状態を投稿する「アンカー」から始め、次に運営主体を信頼する「Trusted Bridge」で資産移動を実現します。そして、市場の要求とプロジェクトの成熟度に応じて、最終的に異議申し立てが可能な「Optimistic Rollup」へと進化させる選択肢を用意します。
+これらの戦略的アプローチは、プロジェクトを現実的かつ持続可能な形で推進するための羅針盤です。以降のセクションでは、この全体戦略に基づき、各開発フェーズにおける具体的な技術的決定と目標を詳述します。
 
-```bash
-cd evm/
-dfx help
-dfx canister --help
-```
+## 2.0 Phase 0: 仕様凍結 — 将来の互換性を保証する不変の土台
 
-## Running the project locally
+この初期フェーズの目的は、プロジェクトの技術的基盤の中で、将来にわたって変更が許されない「決定性」に関わる中核仕様を定義し、凍結することです。開発の初期段階でこれらの不変のルールを確立することにより、将来的な仕様変更に伴う大規模な手戻りや、アップグレード時に状態の互換性が失われるといった致命的なリスクを未然に防ぎます。本フェーズの核心は、「決定性が壊れる種を先に潰すこと」であり、システムの長期的な信頼性と安定性を担保する上で最も重要な工程です。
 
-If you want to test your project locally, you can use the following commands:
+### 2.1 メモリレイアウトとキー空間の凍結
 
-```bash
-# Starts the replica, running in the background
-dfx start --background
+永続化データのレイアウトは、アップグレード耐性の根幹をなします。本プロジェクトでは、ic-stable-structuresのMemoryManagerを利用し、Stable Memoryの各領域に固定のMemoryIdを割り当てます。このレイアウトを一度凍結することで、将来のアップグレード時にもデータ構造が破壊されることなく、安全に状態を引き継ぐことが可能になります。crates/evm-db/src/memory.rsで定義されたAppMemoryIdの完全なレイアウトは以下の通りです。
 
-# Deploys your canisters to the replica and generates your candid interface
-dfx deploy
-```
+| MemoryId | 名称 | 用途 |
+| --- | --- | --- |
+| 0 | UPGRADES | heap上の軽量データをアップグレード時に退避・復元するための予約領域 |
+| 1 | META | magic number, version, schema hash等を保存し、起動時に互換性を検証 |
+| 2 | ACCOUNTS | EVMアカウントの基本情報（nonce, balance, code hash）を格納 |
+| 3 | STORAGE | EVMコントラクトのストレージデータを格納 |
+| 4 | CODES | EVMコントラクトのバイトコードを格納 |
+| 5 | StateAux | 将来のStateDB拡張用の予約領域 |
+| 6 | QueueMeta | トランザクションキューのメタデータ（head/tail）を格納 |
+| 7 | Queue | 未処理トランザクションIDのキューを格納 |
+| 8 | SeenTx | 処理済みトランザクションIDの重複防止セットを格納 |
+| 9 | TxStore | トランザクション本体（Envelope）を格納 |
+| 10 | TxIndex | トランザクションIDからブロック位置へのインデックスを格納 |
+| 11 | Receipts | トランザクションの実行結果（Receipt）を格納 |
+| 12 | Blocks | ブロックデータを格納 |
+| 13 | Head | チェーンの最新ブロック情報を格納 |
+さらに、StateDB（Accounts, Storage, Codes）内のキー空間設計も凍結します。キーは、データの種類を識別するためのバイトプレフィックスを先頭に付与した固定長のバイト列です。crates/evm-db/src/types/keys.rsで定義されるキー構造は以下の通りです。
+- AccountKey: 0x01 || addr20 (21 bytes)
+- StorageKey: 0x02 || addr20 || slot32 (53 bytes)
+- CodeKey: 0x03 || code_hash32 (33 bytes)
+このプレフィックス設計により、キーの辞書順がデータの種類（Account < Storage < Code）とアドレスによって一意に定まります。これにより、異なる種類のデータがキー空間上で衝突することを防ぎ、決定的かつ効率的なデータアクセス（特に範囲検索や全件走査）が保証されます。この順序付けはcrates/evm-db/tests/phase0_ordering.rsのkey_prefix_ordering_is_stableテストによって恒久的に検証されます。
 
-Once the job completes, your application will be available at `http://localhost:4943?canisterId={asset_canister_id}`.
+### 2.2 データエンコーディングとコミット順序の定義
 
-If you have made changes to your backend canister, you can generate a new candid interface with
+データのシリアライズ形式も、決定性を保証するために凍結されるべき重要な仕様です。AccountValやU256Valといった主要な値の型は、crates/evm-db/src/types/values.rsで定義される通り、固定長のバイト列としてエンコードされます。これにより、データの解釈が一意に定まり、将来のバージョンにおいても前方互換性が維持されます。このルールはstorable.rsにおけるStorableトレイトの実装によって強制され、長さが不正なデータはデシリアライズ時にトラップすることで、データの破損を防ぎます。
+状態遷移の再現性を保証するもう一つの根幹は、コミットの順序です。トランザクション実行中の状態変更は、まずメモリ上のOverlayDBに記録されます。overlay.rsで定義されている通り、このOverlayDBは内部的にBTreeMap（キーでソートされたマップ）を使用しており、永続化層へコミットする際には、常にキーの昇順で変更が適用されます。この「OverlayDBのコミット順序はキーの昇順である」というルールを凍結することで、同一のトランザクションを実行すれば、誰がいつ実行しても全く同じ順序で状態が更新され、最終的な状態が完全に一致することが保証されます。
 
-```bash
-npm run generate
-```
+### 2.3 Phase 0の成果物と合格条件
 
-at any time. This is recommended before starting the frontend development server, and will be run automatically any time you run `dfx deploy`.
+このフェーズの完了は、以下の成果物とテスト条件によって定義されます。
+- 成果物:
+  - 仕様書 (spec.md): 凍結されたメモリレイアウト、キー空間、エンコーディング、コミット順序等のルールを明記したドキュメント。
+  - Golden Vectors: 特定の入力（例: Principal）から特定の出力（例: EVMアドレス）を生成するテストケース集。仕様の具体的な実装例として機能します。
+- 合格条件（テスト項目）:
+  - キーの辞書順検証: AccountKeyとStorageKeyなどがプレフィックスによって正しく順序付けられることを確認する。
+  - Storable Roundtrip: すべての凍結されたデータ型が、to_bytesとfrom_bytesを経由しても元の値と一致すること、および不正な長さのデータは拒否されることを検証する。
+  - OverlayDBのコミット順序検証: 異なる順序でデータを挿入しても、コミットされる順序が常にキーの昇順であることを確認する。
+  - Metaデータ検証: 初回起動時に正しいMetaデータが書き込まれ、二回目以降の起動でそのデータが検証され、不正な場合はトラップすることを確認する。
+この凍結された堅牢な土台の上に、次のフェーズでは実際のEVM実行エンジンを構築し、トランザクション処理の心臓部を実装していきます。
 
-If you are making frontend changes, you can start a development server with
+## 3.0 Phase 1: 実行基盤 — "同期Tx体験"の実現
 
-```bash
-npm start
-```
+Phase 0で確立した不変の土台の上に、本プロジェクトの核となる価値「ICPからの同期的な関数呼び出しとしてのEVM実行」を技術的に実現するのがPhase 1です。このフェーズの主目的は、外部ツールとの接続を担うRPCインターフェースよりも先に、「その場で結果が分かるEVM」の実行基盤を構築することにあります。これにより、開発者はEVMコントラクトをあたかも通常のcanister関数のように呼び出すことができ、ユーザー体験を根本的に変える可能性が生まれます。
 
-Which will start a server at `http://localhost:8080`, proxying API requests to the replica at port 4943.
+### 3.1 技術アーキテクチャ：REVMとStable Structuresの統合
 
-### Note on frontend environment variables
+この同期実行体験を実現するため、高性能EVM実行エンジンであるREVMと、ICPの永続化ストレージであるStable Structuresを統合します。このアーキテクチャパターンでは、メモリ上のOverlayDBに変更をバッチし、「Committer」がそれを決定的な順序で永続化層に適用します。
+[REVM Engine] -> [Database Adapter (RevmStableDb)] <-> [OverlayDB (RAM)] -> [Committer] -> [StableBTreeMap (Stable Memory)]
+このパターンの具体的な実装がcrates/evm-core/src/revm_db.rsのRevmStableDbです。これはREVMのDatabaseトレイトを実装したアダプタであり、EVMの状態読み取りをStableBTreeMapにブリッジします。さらに、DatabaseCommitトレイトを実装することで、REVMの実行結果（状態差分）を受け取り、それを直接StableStateのマップ群に書き込むことで「Committer」の役割を果たします。
+この実行基盤を外部に公開する主要な書き込み導線は、crates/ic-evm-wrapper/src/lib.rsで定義されたsubmit_* + produce_blockです。これらのupdate callを通じて、内部ではcrates/evm-core/src/chain.rsの実行ロジックが段階的に適用されます。
+1. 受け取ったトランザクションをデコードする。
+2. REVMエンジンを用いてトランザクションを実行し、状態変更をコミットする。
+3. 更新後の状態から新しいstate_rootを計算する。
+4. 決定的なルールに基づき新しいblock_hashを計算する。
+5. この「1トランザクションのみを含む新しいブロック」を永続化し、チェーンのHeadを更新する。
+処理が完了するとreceipt/tx参照APIから結果を取得でき、運用上は単一のsubmit導線で制御できます。
 
-If you are hosting frontend code somewhere without using DFX, you may need to make one of the following adjustments to ensure your project does not fetch the root key in production:
+### 3.2 決定性の保証
 
-- set`DFX_NETWORK` to `ic` if you are using Webpack
-- use your own preferred method to replace `process.env.DFX_NETWORK` in the autogenerated declarations
-  - Setting `canisters -> {asset_canister_id} -> declarations -> env_override to a string` in `dfx.json` will replace `process.env.DFX_NETWORK` with the string in the autogenerated declarations
-- Write your own `createActor` constructor
+ICPのcanisterは、コンセンサスを通じてすべてのレプリカが同じ状態に至る「決定性」が求められます。本プロジェクトのEVM実行においても、この決定性を厳密に保証するためのルールを設けています。
+- ブロック情報の決定的生成: crates/evm-core/src/hash.rsで定義されている通り、ブロックのメタデータは外部の不確定な要素に依存せず、完全に決定的に生成されます。
+  - タイムスタンプ: parent.timestamp + 1 のように、親ブロックのタイムスタンプに固定値を加算して計算します。
+  - tx_list_hash: ブロックに含まれるトランザクションIDのリストから、順序を考慮して決定的に計算されます。
+  - ブロックハッシュ: block_hash関数は、親ブロックハッシュ、ブロック番号、タイムスタンプ、tx_list_hash、そしてステートルートといった全ての決定的な入力から、一意のハッシュ値を算出します。
+- ステートルートの計算: Phase 1では、性能よりも計算の正確性と再現性を最優先します。crates/evm-core/src/state_root.rsのcompute_state_root関数は、StableBTreeMapに保存されている全てのアカウント、ストレージ、コードデータを全件走査し、それらを連結したもののハッシュを計算します。このアプローチは計算コストが高いものの、状態が完全に一致すれば必ず同じステートルートが生成されることを保証し、システムの正しさを検証するための確実な基準となります。
+これらの仕組みにより、同一のトランザクションシーケンスが与えられた場合、どのレプリカで実行されても、常に同一の状態遷移、同一のステートルート、そして同一のブロックハッシュが生成されることが保証されます。
+
+### 3.3 Phase 1の成果物と合格条件
+
+このフェーズの完了は、以下の基準が満たされることで検証されます。
+- 同一トランザクション列の再現性: 同一のトランザクション列を複数回実行した際に、最終的なstate_rootが完全に一致すること。
+- アップグレード耐性: canisterをアップグレードした後も、既存の状態（アカウント、ストレージ、ブロック履歴）が破壊されず、正常に動作し続けること。
+- 書き込み導線の機能: submit_* + produce_block 経路で、トランザクションの成功（success）または失敗（revert）のステータスがreceipt経由で正しく取得できること。
+このコア実行基盤が完成したことで、プロジェクトは独自の価値を持つエンジンを手に入れました。次のフェーズでは、この強力なエンジンを外部の開発者エコシステムに接続するための窓口となる、RPC層の実装へと進みます。
+
+## 4.0 Phase 2: RPCノード化 — 開発者体験の構築
+
+Phase 1で構築した独自のコア実行エンジンは、それだけでは閉じた世界に留まります。Phase 2の目的は、このエンジンを外部の開発者や標準的なツール（Viem, Ethers, Foundryなど）が利用できるようにするための「窓口」として、HTTP JSON-RPCインターフェースを実装することです。このフェーズは、プロジェクトを単なる技術的証明から、開発者が実際に触れてアプリケーションを構築できるプラットフォームへと昇華させる重要なステップです。
+本フェーズにおいて我々が下す重要な戦略的判断は、「仕様の割り切り」です。目標はEthereumノードの完全な互換性を達成することではなく、開発、デバッグ、ツール接続に必要となる最低限のRPCメソッドを戦略的に提供することにあります。このトレードオフにより、pending状態やeth_getLogsといった複雑で実装負荷の高い機能（「沼回避」）を避け、迅速に開発者体験の基盤を構築します。
+
+### 4.1 RPC実装方針
+
+RPCインターフェースは、Internet Computerのアーキテクチャに準拠した形で実装されます。
+- HTTPエンドポイントの分離: ICの実行モデルに従い、状態を読み取るだけのRPCメソッドは**http_request (query call)で処理し、状態を変更する可能性のあるメソッドはhttp_request_update (update call)**で処理します。この明確な分離により、読み取り系の操作は高速かつ安全に実行され、書き込み系の操作はコンセンサスを経て確実に処理されることが保証されます。
+- 実装メソッドの戦略的選択: 開発者体験を最大化するため、実装するRPCメソッドには優先順位をつけます。
+  - 実装対象メソッド (最小ノードセット): 開発者がツールを接続し、基本的なコントラクトのデプロイ、読み取り、トランザクション送信を行えるようにするために不可欠なメソッド群です。
+    - eth_chainId, eth_blockNumber (チェーンの基本情報)
+    - eth_getBlockByNumber, eth_getTransactionReceipt (ブロックとトランザクションの参照)
+    - eth_call, eth_getBalance, eth_getCode (状態の読み取り)
+    - eth_sendRawTransaction (トランザクションの送信)
+  - 実装見送り対象メソッド: 実装が複雑で、初期の開発サイクルにおいては必須ではないと判断されたメソッド群です。これらを意図的に除外することで、開発リソースをコア機能に集中させます。
+    - pending/mempool関連: 本システムは即時実行モデルを基本とするため、pending状態の概念は適用しません。
+    - eth_getLogs/filter関連: イベントログの効率的な検索には複雑なインデックス機構が必要となり、実装の「沼」に陥りやすいため、このフェーズでは見送ります。
+
+### 4.2 Phase 2の合格条件
+
+このフェーズの成功は、外部ツールとの具体的な連携が機能するかどうかで判断されます。
+- ツール接続と基本操作:
+  - viemやethers.jsといった主要なクライアントライブラリを用いてcanisterに接続できること。
+  - 接続したツールから、スマートコントラクトのdeploy、call（読み取り）、sendRawTransaction（書き込み）といった一連の基本操作が正常に完了すること。
+- 応答の決定性:
+  - canisterが同一の状態にある限り、読み取り系のRPCリクエストに対して常に同一の応答を返すこと。
+内部的な実行基盤と外部との接続性が確立されたことで、このEVM環境は技術的に独立したチェーンとして機能するようになりました。次のステップでは、このチェーンの価値を外部のブロックチェーンエコシステム、特にL1 Ethereumと接続するためのブリッジ機能の開発に進みます。
+
+## 5.0 Phase 3: L1アンカーとTrusted Bridge — 外部との価値接続
+
+これまでのフェーズで構築してきたスタンドアロンのEVM環境を、L1 Ethereumエコシステムと接続し、具体的な資産移動を可能にする最初のステップがPhase 3です。このフェーズでは、完全なトラストレス性（信頼不要）を追求するのではなく、運営主体（DAOやマルチシグ）を信頼する「Trusted」モデルを意図的に採用します。これにより、技術的な複雑さを抑えつつ、実用性と安全性を両立させた形で、外部との価値の接続を実現します。
+このフェーズのスコープは明確に定義されています。中心となるのは、L2（本EVM canister）の状態を示すstate_root等を定期的にL1へ投稿するアンカー機能と、外部のRelayerを介して資産を移動させるTrusted Bridge機能です。Fault Proof（不正証明）のようなL1担保セキュリティの仕組みは、このフェーズの対象外です。
+
+### 5.1 アーキテクチャ概要
+
+Phase 3のアーキテクチャは、以下の主要コンポーネントで構成されます。
+- EVM canister: L2の実行環境本体。トランザクションを処理し、状態を更新します。
+- 外部Relayer: L1とL2のイベントを監視し、両チェーン間の通信を仲介するオフチェーンプロセス。
+- L1 Contracts: L1 Ethereum上にデプロイされるスマートコントラクト群（OutputOracle, L1BridgeVaultなど）。
+資産の移動プロセスは、入金（Deposit）と出金（Withdraw）で以下のように異なります。
+- Deposit Flow (L1 → L2):
+    1. ユーザーがL1上のL1BridgeVaultコントラクトのdeposit()関数を呼び出し、資産をロックします。
+    2. L1BridgeVaultはDepositInitiatedイベントを発行します。
+    3. Relayerがこのイベントを監視し、情報を取得します。
+    4. RelayerがEVM canisterのapply_deposit()関数を呼び出します。
+    5. EVM canisterはL2上で対応するWrapped Tokenをユーザーにミント（発行）します。
+- Withdraw Flow (L2 → L1):
+    1. ユーザーがL2上のL2Bridgeコントラクトのwithdraw()関数を呼び出し、Wrapped Tokenをバーン（焼却）します。
+    2. L2BridgeはWithdrawalInitiatedイベントを発行します（EVMログとして記録）。
+    3. RelayerがこのL2上のイベントを監視し、情報を取得します。
+    4. RelayerがL1上のL1BridgeVaultコントラクトのfinalizeWithdrawal()関数を呼び出します。
+    5. 検証後、L1BridgeVaultはロックされていた資産をユーザーに解放します。
+
+### 5.2 セキュリティモデルとガードレール
+
+本フェーズのセキュリティは、技術的な証明ではなく、運用体制によって担保される「DAO/マルチシグ運用担保」のTrustedモデルであることを明確に認識する必要があります。具体的には、出金の最終承認権限を持つRelayerやL1コントラクトの管理者（DAOやマルチシグ）の信頼性に依存します。
+この信頼モデルに伴うリスクを軽減するため、以下の必須のガードレール（安全装置）を実装します。
+- pause(): 緊急時にブリッジの機能（入出金）を一時停止させる機能。
+- withdrawal_daily_limit: 一定期間内に出金できる総額に上限を設け、大規模な資金流出リスクを抑制する。
+- token_allowlist: ブリッジが対応するトークンをホワイトリスト形式で管理し、予期せぬ資産の移動を防ぐ。
+- timelock: 管理者権限の変更や上限額の変更といった重要な操作に時間的な遅延を設け、コミュニティが事前に検知・対応する時間的猶予を確保する。
+
+### 5.3 Phase 3の合格条件
+
+このフェーズの完了は、L1との間で価値が実際に移動できるかによって判断されます。
+- 資産移動の実現: L1 Ethereumと本EVMチェーンとの間で、信頼モデル（trust前提）に基づき資産が双方向に移動できること。
+- 監視可能性の確保: L2の状態がL1アンカーコントラクトに定期的に投稿されることで、チェーンの活動が外部から透明性をもって監視可能であること。
+Trustedモデルによる外部エコシステムとの接続が成功した今、プロジェクトは実用的な価値を持つチェーンへと進化しました。次のステップとして、この信頼モデルをより強力なL1担保のセキュリティモデルへと進化させる、技術的に最も挑戦的な選択肢を検討します。
+
+## 6.0 Phase 4: Optimistic Rollup化 — L1担保セキュリティへの道
+
+このフェーズは、プロジェクトを「透明性の高い運営チェーン」から、L1 Ethereumのセキュリティによってその正当性が担保された真の「Optimistic Rollup」へと昇格させる、技術的に最も挑戦的かつ重要なステップです。Phase 4への移行は必須ではありませんが、これを実現すれば、運営主体への信頼を必要としない最高レベルのセキュリティをユーザーに提供できます。
+L1担保とは、以下の条件が満たされている状態を指します。
+1. 全てのトランザクションデータがL1に投稿（Data Availability）され、誰でもそれを基にL2の状態を再実行できる。
+2. L2からL1に投稿された不正な状態（出力）に対して、誰でも異議を申し立て（Challenge）、その確定を阻止できる。
+3. 異議申し立てが発生した場合、その正否はL1上のスマートコントラクトによって機械的に裁定される。
+
+### 6.1 主要コンポーネントと技術仕様
+
+Optimistic Rollupを実現するためには、以下の主要な技術コンポーネントが必要となります。
+- Data Availability (DA): BatchInboxというL1コントラクトを介して、L2のトランザクションデータをバッチとしてL1に投稿する仕組みです。これにより、L2の運営者がデータを隠蔽することが不可能になり、誰でも状態を検証するための入力データが保証されます。
+- Outbox: L2からの出金要求をマークルツリー（Merkle Tree）化し、そのルートハッシュをL1に投稿する仕組みです。ユーザーは、自身の出金要求がマークルツリーに含まれていることを証明（Merkle Proof）することで、L1で資産を引き出すことができます。
+- Fault Proof VM (FPVM): 不正を証明するための検証をL1上で行う仮想マシンです。EVM全体をL1でエミュレートするのはコストが高すぎるため、MIPSやRISC-Vのようなより単純なアーキテクチャのVMをL1上でエミュレートし、状態遷移の「1ステップ（1命令）」だけを検証できるようにします。FPVMには、Cannonフレームワークに類似したMIPS風の命令セットアーキテクチャを採用します。この選択は、より複雑なISAを導入するよりも、実装の現実性と確立された設計パターンの活用を優先するという、現実的なトレードオフに基づいています。
+- Dispute Game: 提案者（Proposer）と挑戦者（Challenger）が、不正な状態遷移が発生した箇所を特定するためのゲームです。両者は二分探索（バイセクション）の手法を用いて、数百万ステップの実行トレースの中から不正が発生した単一のステップを効率的に絞り込み、最終的にその1ステップをFPVMで裁定します。
+このフェーズでは、一度決定すると後方互換性を壊さずに変更することが極めて困難な仕様、いわゆる**「凍結ポイント」**が存在します。L1に投稿するbatchのエンコード形式や、L2の出力を要約するoutput_rootの定義などがこれにあたり、設計には細心の注意が必要です。
+
+### 6.2 Phase 4への移行判断
+
+plan.mdが示す通り、このフェーズへの移行は技術的な必然ではなく、「L1担保を名乗りたいか」という戦略的な判断に依存します。最高レベルのセキュリティとトラストレス性を追求し、主要なL2ソリューションと肩を並べることを目指すのであれば、この道は不可欠です。一方で、移行しない場合はPhase 3のTrustedモデルを維持し、DAOによるガバナンスや運用ガードレールをさらに強化することで、「透明性の高い運営チェーン」としての価値を訴求する代替案も存在します。
+この高難易度のフェーズを乗り越え、チェーンが技術的に完成した後は、その実用性を高め、開発者エコシステムを本格的に拡大するための最終フェーズへと移行します。
+
+## 7.0 Phase 5: プロダクト化 — 実用性とエコシステムの成熟
+
+Phase 4まででチェーンの技術的な完成度とセキュリティは最高レベルに達しましたが、それが直ちに「開発者に選ばれ、実際に使われるチェーン」になるわけではありません。Phase 5の目的は、パフォーマンス、RPC互換性、運用性、接続性といった実用的な側面をプロダクトレベルにまで引き上げ、開発者が定着し、エコシステムが自律的に成長するための土壌を整えることです。このフェーズは、「Phase 4で確立したOptimistic Rollupのセキュリティを損なうことなく、スループット、コスト、運用を現実的なものにする」という重要な役割を担います。
+
+### 7.1 主要な改善項目
+
+このフェーズでは、これまでの実装で意図的に後回しにしてきた課題や、実運用でボトルネックとなりうる箇所に焦点を当てて改善を行います。
+
+#### 7.1.1 パフォーマンス改善
+
+- 課題: Phase 1で導入した「全件走査」によるstate_root計算は、状態が大きくなるにつれてブロック生成の深刻なボトルネックとなります。
+- 施策: 状態の変更があった部分だけを効率的に計算に含める「差分マークルツリー（Incremental Merkle Tree）」を導入します。これにより、ステートルート計算のコストが状態全体のサイズに比例するO(N)から、変更点の数に比例するO(changes * log N)へと改善され、ブロック生成速度が劇的に向上します。
+
+#### 7.1.2 RPC互換性の拡張
+
+- 課題: Phase 2で実装したRPCは「最小セット」であり、多くの高度な開発者ツールやdAppは、より豊富なRPCメソッドを要求します。
+- 施策: eth_getLogs（イベントログのクエリ）やeth_feeHistoryといった、より多くのdAppやインフラツールが必要とするRPCメソッドを段階的に追加実装します。これにより、開発者は既存のEVMエコシステムのツールやライブラリをよりシームレスに利用できるようになります。
+
+#### 7.1.3 ブリッジの拡張
+
+- 課題: Phase 3で実装したブリッジは、単一のERC20トークンの移動を想定したTrusted Bridgeでした。
+- 施策: 複数トークンへの対応（token_allowlistの拡張）や、資産移動にとどまらない汎用的なメッセージをL1とL2間で送受信できる「汎用メッセージパッシング」機能へと拡張します。これにより、L1のコントラクトがL2のコントラクトを呼び出すといった、より高度なクロスチェーン連携が可能になります。
+
+#### 7.1.4 分散運用
+
+- 課題: プロジェクトが成功しトラフィックが増加すると、単一のcanisterがシーケンサーと実行の両方を担う現在のアーキテクチャでは限界を迎える可能性があります。
+- 施策: 将来的なスケーリング戦略として、役割ごとにcanisterを水平分割する構想を立てます。例えば、状態管理を専門とする「State Canister」、トランザクション実行を担う「Execution Canister」、RPCリクエストを処理する「RPC Gateway Canister」に分割することで、システム全体の負荷分散とスループット向上を目指します。
+
+#### 7.1.5 "ICPから呼べる価値"の製品化
+
+- 課題: submit/produceの二段階モデルは、導入初期に実行完了の扱いを誤りやすい場合があります。
+- 施策: submit_ic_tx + produce_block を中心に、SDK、サンプルdApp（会員証、決済、業務承認など）、レート制限や課金モデルのテンプレートを整備します。これにより、「ICPのワークフローとEVMの台帳機能を組み合わせる」といった具体的なユースケースを提示し、本プロジェクトならではの強みを具体的な「製品」として開発者に届けます。
+
+### 7.2 Phase 5の必要性
+
+Phase 4を完了した時点で、技術的には「L1担保のチェーン」として完成しているように見えるかもしれません。しかし、速度、RPC互換性、運用性、そして外部との接続性が弱いままでは、開発者は他の成熟したL2チェーンを選んでしまい、エコシステムは成長しません。したがって、現実に広く使われるチェーンを目指すのであれば、このPhase 5はプロジェクトの長期的な成功に不可欠な、ほぼ必須のフェーズと言えます。
+これまでのフェーズで概説した段階的な開発ロードマップは、技術的な堅牢性と市場での実用性を両立させるための戦略的なアプローチです。
+
+## 8.0 結論：段階的進化による持続可能なEVMエコシステムの構築
+
+本計画書は、Internet Computer Protocol (ICP) の上で独自のEVM互換canisterを構築するための、段階的かつ戦略的なロードマップを提示しました。この計画は、決定性の根幹を固める不変の土台（Phase 0）から始まり、我々の核となる価値である同期的実行体験（Phase 1）を実現し、その後、RPCインターフェース、Trusted Bridge、そしてL1担保のOptimistic Rollupへと、外部エコシステムとの接続性、セキュリティ、実用性を methodical に拡張していく意図的な道筋を描いています。このフェーズ化されたアプローチは、単なるタスクの羅列ではなく、複雑性を管理し、段階的に価値を提供し、最終的にICP上で回復力があり開発者中心のEVM環境を構築するための戦略的フレームワークです。我々が目指すのは、開発者に選ばれ、ユーザーに愛され、持続的に成長していくエコシステムの構築であり、本計画はそのための現実的かつ戦略的な道筋を示すものと確信しています。

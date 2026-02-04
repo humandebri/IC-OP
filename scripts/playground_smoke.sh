@@ -182,7 +182,7 @@ tx = version + to + value + gas + nonce + max_fee + max_priority + data_len + da
 print('; '.join(str(b) for b in tx))
 PY
 )
-  EXEC_OUT=$($DFX call $CANISTER_ID execute_ic_tx "(vec { $IC_BYTES })")
+  EXEC_OUT=$($DFX call $CANISTER_ID submit_ic_tx "(vec { $IC_BYTES })")
   if EXEC_OUT="$EXEC_OUT" is_ok_variant; then
     SELECTED_NONCE="$nonce_val"
     break
@@ -193,10 +193,12 @@ PY
   break
 done
 if ! EXEC_OUT="$EXEC_OUT" is_ok_variant; then
-  echo "[playground-smoke] execute_ic_tx failed: $EXEC_OUT"
+  echo "[playground-smoke] submit_ic_tx failed: $EXEC_OUT"
   exit 1
 fi
-log "execute_ic_tx accepted nonce=${SELECTED_NONCE}"
+log "submit_ic_tx accepted nonce=${SELECTED_NONCE}"
+log "producing block for ic tx"
+assert_command "$DFX call $CANISTER_ID produce_block '(1)'"
 SKIP_ETH=0
 ETH_PRIVKEY=$(random_privkey)
 RAW_TX="$(raw_tx_bytes_with_nonce 0 "$ETH_PRIVKEY")"

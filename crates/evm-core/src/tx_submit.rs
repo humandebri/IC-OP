@@ -58,7 +58,11 @@ pub fn apply_nonce_and_replacement(
 fn account_nonce_from_state(state: &StableState, sender: SenderKey) -> u64 {
     // IcSynthetic/Eth共通のexpected_nonce初期化に使う（EVM stateのnonce）
     let key = make_account_key(sender.0);
-    state.accounts.get(&key).map(|value| value.nonce()).unwrap_or(0)
+    state
+        .accounts
+        .get(&key)
+        .map(|value| value.nonce())
+        .unwrap_or(0)
 }
 
 fn bump_expected_nonce(state: &mut StableState, sender: SenderKey) {
@@ -78,12 +82,16 @@ fn effective_gas_price_for_tx(
 ) -> Result<u64, NonceRuleError> {
     let envelope = state.tx_store.get(&tx_id).ok_or(NonceRuleError::Conflict)?;
     let stored = StoredTx::try_from(envelope).map_err(|_| NonceRuleError::Conflict)?;
-    let max_fee_per_gas = stored.fee.max_fee_per_gas;
-    let max_priority_fee_per_gas = stored.fee.max_priority_fee_per_gas;
-    let is_dynamic_fee = stored.fee.is_dynamic_fee;
+    let max_fee_per_gas = stored.max_fee_per_gas;
+    let max_priority_fee_per_gas = stored.max_priority_fee_per_gas;
+    let is_dynamic_fee = stored.is_dynamic_fee;
     compute_effective_gas_price(
         max_fee_per_gas,
-        if is_dynamic_fee { max_priority_fee_per_gas } else { 0 },
+        if is_dynamic_fee {
+            max_priority_fee_per_gas
+        } else {
+            0
+        },
         base_fee,
     )
     .ok_or(NonceRuleError::Conflict)

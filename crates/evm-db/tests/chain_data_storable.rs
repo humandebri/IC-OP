@@ -2,8 +2,10 @@
 
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{
-    BlockData, CallerKey, ChainStateV1, Head, QueueMeta, ReceiptLike, StoredTx, StoredTxBytes,
-    TxId, TxIndexEntry, TxKind, TxLoc,
+    BlockData, CallerKey, ChainStateV1, Head, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1,
+    OpsMetricsV1, QueueMeta, ReceiptLike, StoredTx, StoredTxBytes, SystemTxHealthV1, TxId,
+    TxIndexEntry, TxKind,
+    TxLoc,
 };
 use ic_stable_structures::Storable;
 
@@ -82,18 +84,168 @@ fn receipt_roundtrip() {
         status: 1,
         gas_used: 21000,
         effective_gas_price: 0,
+        l1_data_fee: 11,
+        operator_fee: 22,
+        total_fee: 33,
         return_data_hash: [0x55u8; 32],
         return_data: vec![1, 2, 3],
         contract_address: None,
-        logs: vec![LogEntry {
-            address: [0x11u8; 20],
-            topics: vec![[0x22u8; 32]],
-            data: vec![0x33, 0x44],
-        }],
+        logs: vec![test_log(
+            [0x11u8; 20],
+            vec![[0x22u8; 32]],
+            vec![0x33, 0x44],
+        )],
     };
     let bytes = receipt.to_bytes();
     let decoded = ReceiptLike::from_bytes(bytes);
     assert_eq!(receipt, decoded);
+}
+
+#[test]
+fn receipt_log_binary_stability_roundtrip() {
+    let receipt = ReceiptLike {
+        tx_id: TxId([0x88u8; 32]),
+        block_number: 3,
+        tx_index: 1,
+        status: 1,
+        gas_used: 30_000,
+        effective_gas_price: 50,
+        l1_data_fee: 1,
+        operator_fee: 2,
+        total_fee: 3,
+        return_data_hash: [0x77u8; 32],
+        return_data: vec![0xaa, 0xbb],
+        contract_address: Some([0x66u8; 20]),
+        logs: vec![test_log(
+            [0x11u8; 20],
+            vec![[0x01u8; 32], [0x02u8; 32]],
+            vec![0x00, 0xff, 0x42],
+        )],
+    };
+    let encoded = receipt.to_bytes().into_owned();
+    let decoded = ReceiptLike::from_bytes(encoded.clone().into());
+    let reencoded = decoded.to_bytes().into_owned();
+    assert_eq!(encoded, reencoded);
+}
+
+#[test]
+fn receipt_decode_rejects_topics_over_limit() {
+    let tx_id = TxId([0x99u8; 32]);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"rcptv2\0\x02");
+    bytes.extend_from_slice(&tx_id.0);
+    bytes.extend_from_slice(&1u64.to_be_bytes()); // block
+    bytes.extend_from_slice(&0u32.to_be_bytes()); // index
+    bytes.push(1u8); // status
+    bytes.extend_from_slice(&21_000u64.to_be_bytes()); // gas used
+    bytes.extend_from_slice(&1u64.to_be_bytes()); // effective gas price
+    bytes.extend_from_slice(&0u128.to_be_bytes()); // l1_data_fee
+    bytes.extend_from_slice(&0u128.to_be_bytes()); // operator_fee
+    bytes.extend_from_slice(&0u128.to_be_bytes()); // total_fee
+    bytes.extend_from_slice(&[0u8; 32]); // return_data_hash
+    bytes.extend_from_slice(&0u32.to_be_bytes()); // return_data len
+    bytes.push(0u8); // no contract
+    bytes.extend_from_slice(&[0u8; 20]); // contract bytes
+    bytes.extend_from_slice(&1u32.to_be_bytes()); // logs len
+    bytes.extend_from_slice(&[0x11u8; 20]); // log address
+    bytes.extend_from_slice(&5u32.to_be_bytes()); // topics len (invalid)
+    for _ in 0..5 {
+        bytes.extend_from_slice(&[0x22u8; 32]);
+    }
+    bytes.extend_from_slice(&0u32.to_be_bytes()); // data len
+
+    let decoded = ReceiptLike::from_bytes(bytes.into());
+    assert_eq!(decoded.tx_id, TxId([0u8; 32]));
+    assert!(decoded.logs.is_empty());
+}
+
+#[test]
+fn l1_block_info_roundtrip() {
+    let params = L1BlockInfoParamsV1 {
+        schema_version: 1,
+        spec_id: 107,
+        empty_ecotone_scalars: false,
+        l1_fee_overhead: 1,
+        l1_base_fee_scalar: 2,
+        l1_blob_base_fee_scalar: 3,
+        operator_fee_scalar: 4,
+        operator_fee_constant: 5,
+    };
+    let params_decoded = L1BlockInfoParamsV1::from_bytes(params.to_bytes());
+    assert_eq!(params, params_decoded);
+
+    let snapshot = L1BlockInfoSnapshotV1 {
+        schema_version: 1,
+        enabled: true,
+        l1_block_number: 10,
+        l1_base_fee: 20,
+        l1_blob_base_fee: 30,
+    };
+    let snapshot_decoded = L1BlockInfoSnapshotV1::from_bytes(snapshot.to_bytes());
+    assert_eq!(snapshot, snapshot_decoded);
+}
+
+#[test]
+fn ops_metrics_roundtrip() {
+    let metrics = OpsMetricsV1 {
+        schema_version: 1,
+        exec_halt_unknown_count: 7,
+        last_exec_halt_unknown_warn_ts: 99,
+        l1_snapshot_disabled_skip_count: 13,
+        last_l1_snapshot_disabled_warn_ts: 101,
+    };
+    let decoded = OpsMetricsV1::from_bytes(metrics.to_bytes());
+    assert_eq!(metrics, decoded);
+}
+
+#[test]
+fn ops_metrics_v1_decode_backfills_snapshot_fields_with_zero() {
+    let mut legacy = vec![0u8; 24];
+    legacy[0] = 1;
+    legacy[8..16].copy_from_slice(&7u64.to_be_bytes());
+    legacy[16..24].copy_from_slice(&99u64.to_be_bytes());
+    let decoded = OpsMetricsV1::from_bytes(legacy.into());
+    assert_eq!(decoded.schema_version, 1);
+    assert_eq!(decoded.exec_halt_unknown_count, 7);
+    assert_eq!(decoded.last_exec_halt_unknown_warn_ts, 99);
+    assert_eq!(decoded.l1_snapshot_disabled_skip_count, 0);
+    assert_eq!(decoded.last_l1_snapshot_disabled_warn_ts, 0);
+}
+
+#[test]
+fn system_tx_health_roundtrip() {
+    let health = SystemTxHealthV1 {
+        schema_version: 1,
+        consecutive_failures: 3,
+        last_fail_ts: 10,
+        last_warn_ts: 11,
+        backoff_until_ts: 12,
+        backoff_hits: 13,
+    };
+    let decoded = SystemTxHealthV1::from_bytes(health.to_bytes());
+    assert_eq!(health, decoded);
+}
+
+#[test]
+fn receipt_v1_decode_backfills_new_fee_fields_with_zero() {
+    let tx_id = TxId([0x77u8; 32]);
+    let mut old = Vec::new();
+    old.extend_from_slice(&tx_id.0);
+    old.extend_from_slice(&2u64.to_be_bytes());
+    old.extend_from_slice(&0u32.to_be_bytes());
+    old.push(1u8);
+    old.extend_from_slice(&21_000u64.to_be_bytes());
+    old.extend_from_slice(&30u64.to_be_bytes());
+    old.extend_from_slice(&[0x55u8; 32]);
+    old.extend_from_slice(&0u32.to_be_bytes());
+    old.push(0u8);
+    old.extend_from_slice(&[0u8; 20]);
+    old.extend_from_slice(&0u32.to_be_bytes());
+    let decoded = ReceiptLike::from_bytes(old.into());
+    assert_eq!(decoded.tx_id, tx_id);
+    assert_eq!(decoded.l1_data_fee, 0);
+    assert_eq!(decoded.operator_fee, 0);
+    assert_eq!(decoded.total_fee, 0);
 }
 
 #[test]
@@ -161,4 +313,13 @@ fn caller_key_roundtrip() {
     let bytes = key.to_bytes();
     let decoded = CallerKey::from_bytes(bytes);
     assert_eq!(key, decoded);
+}
+
+fn test_log(address: [u8; 20], topics: Vec<[u8; 32]>, data: Vec<u8>) -> LogEntry {
+    let topics = topics
+        .into_iter()
+        .map(alloy_primitives::B256::from)
+        .collect::<Vec<_>>();
+    let data = alloy_primitives::Bytes::from(data);
+    LogEntry::new_unchecked(alloy_primitives::Address::from(address), topics, data)
 }

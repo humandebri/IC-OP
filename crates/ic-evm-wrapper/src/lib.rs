@@ -1,11 +1,14 @@
-//! どこで: canister入口 / 何を: Phase1のAPI公開 / なぜ: ICPから同期Tx実行を提供するため
+//! どこで: canister入口 / 何を: Phase1のAPI公開 / なぜ: submit中心の安全な運用導線を提供するため
 
 use candid::CandidType;
-use ic_cdk::api::{canister_cycle_balance, debug_print, is_controller, msg_caller, time};
-use evm_db::chain_data::constants::MAX_RETURN_DATA;
+use ic_cdk::api::{
+    accept_message, canister_cycle_balance, debug_print, is_controller,
+    msg_caller, msg_method_name, time,
+};
+use evm_db::chain_data::constants::{MAX_QUEUE_SNAPSHOT_LIMIT, MAX_RETURN_DATA, MAX_TX_SIZE};
 use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::{
-    BlockData, OpsConfigV1, OpsMode, RawTx, ReceiptLike, StoredTx, StoredTxBytes,
+    BlockData, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, OpsConfigV1, OpsMode, ReceiptLike, StoredTx, StoredTxBytes,
     TxId, TxKind, TxLoc, TxLocKind,
 };
 use evm_db::meta::{current_schema_version, ensure_meta_initialized, get_meta, mark_migration_applied};
@@ -86,8 +89,28 @@ pub struct OpsStatusView {
     pub last_check_ts: u64,
     pub mode: OpsModeView,
     pub safe_stop_latched: bool,
+    pub l1_fee_fallback_count: u64,
     pub needs_migration: bool,
     pub schema_version: u32,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct L1BlockInfoParamsView {
+    pub spec_id: u8,
+    pub empty_ecotone_scalars: bool,
+    pub l1_fee_overhead: u128,
+    pub l1_base_fee_scalar: u128,
+    pub l1_blob_base_fee_scalar: u128,
+    pub operator_fee_scalar: u128,
+    pub operator_fee_constant: u128,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct L1BlockInfoSnapshotView {
+    pub enabled: bool,
+    pub l1_block_number: u64,
+    pub l1_base_fee: u128,
+    pub l1_blob_base_fee: u128,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -123,6 +146,9 @@ pub struct ReceiptView {
     pub status: u8,
     pub gas_used: u64,
     pub effective_gas_price: u64,
+    pub l1_data_fee: u128,
+    pub operator_fee: u128,
+    pub total_fee: u128,
     pub return_data_hash: Vec<u8>,
     pub return_data: Option<Vec<u8>>,
     pub contract_address: Option<Vec<u8>>,
@@ -240,6 +266,9 @@ pub struct EthReceiptView {
     pub status: u8,
     pub gas_used: u64,
     pub effective_gas_price: u64,
+    pub l1_data_fee: u128,
+    pub operator_fee: u128,
+    pub total_fee: u128,
     pub contract_address: Option<Vec<u8>>,
     pub logs: Vec<LogView>,
 }
@@ -285,6 +314,7 @@ pub enum PendingStatusView {
 pub enum TxKindView {
     EthSigned,
     IcSynthetic,
+    OpDeposit,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -313,10 +343,53 @@ pub struct PruneStatusView {
     pub need_prune: bool,
 }
 
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GenesisBalanceView {
+    pub address: Vec<u8>,
+    pub amount: u128,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct InitArgs {
+    pub genesis_balances: Vec<GenesisBalanceView>,
+}
+
+impl InitArgs {
+    fn validate(&self) -> Result<(), String> {
+        let mut seen_addresses = std::collections::BTreeSet::new();
+        if self.genesis_balances.is_empty() {
+            return Err("genesis_balances must be non-empty".to_string());
+        }
+        for (idx, alloc) in self.genesis_balances.iter().enumerate() {
+            if alloc.address.len() != 20 {
+                return Err(format!("balance[{idx}].address must be 20 bytes"));
+            }
+            if alloc.amount == 0 {
+                return Err(format!("balance[{idx}].amount must be > 0"));
+            }
+            if !seen_addresses.insert(alloc.address.clone()) {
+                return Err(format!("duplicate genesis address at balance[{idx}]"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[ic_cdk::init]
-fn init() {
+fn init(args: Option<InitArgs>) {
     let _ = ensure_meta_initialized();
     init_stable_state();
+    let args = args.unwrap_or_else(|| {
+        ic_cdk::trap("InitArgsRequired: InitArgs is required; pass (opt record {...})")
+    });
+    if let Err(reason) = args.validate() {
+        ic_cdk::trap(&format!("InvalidInitArgs: {reason}"));
+    }
+    for alloc in args.genesis_balances.iter() {
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&alloc.address);
+        chain::dev_mint(addr, alloc.amount).unwrap_or_else(|_| ic_cdk::trap("init: genesis mint failed"));
+    }
     observe_cycles();
     schedule_cycle_observer();
     schedule_prune();
@@ -338,62 +411,48 @@ fn pre_upgrade() {
     upgrade::pre_upgrade();
 }
 
-#[ic_cdk::update]
-fn execute_eth_raw_tx(raw_tx: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(ExecuteTxError::Rejected(reason));
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = msg_method_name();
+    if !inspect_method_allowed(method.as_str()) {
+        return;
     }
-    let result = match chain::execute_eth_raw_tx(raw_tx) {
-        Ok(value) => value,
-        Err(chain::ChainError::DecodeFailed) => {
-            return Err(ExecuteTxError::InvalidArgument("decode failed".to_string()));
-        }
-        Err(chain::ChainError::TxTooLarge) => {
-            return Err(ExecuteTxError::InvalidArgument("tx too large".to_string()));
-        }
-        Err(chain::ChainError::TxAlreadySeen) => {
-            return Err(ExecuteTxError::Rejected("tx already seen".to_string()));
-        }
-        Err(chain::ChainError::InvalidFee) => {
-            return Err(ExecuteTxError::Rejected("invalid fee".to_string()));
-        }
-        Err(chain::ChainError::NonceTooLow) => {
-            return Err(ExecuteTxError::Rejected("nonce too low".to_string()));
-        }
-        Err(chain::ChainError::NonceGap) => {
-            return Err(ExecuteTxError::Rejected("nonce gap".to_string()));
-        }
-        Err(chain::ChainError::NonceConflict) => {
-            return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
-        }
-        Err(chain::ChainError::ExecFailed(err)) => {
-            debug_print(format!("execute_ic_tx exec_failed: {:?}", err));
-            let detail = format!("execution failed: {:?}", err);
-            return Err(ExecuteTxError::Rejected(detail));
-        }
-        Err(err) => {
-            debug_print(format!("execute_eth_raw_tx err: {:?}", err));
-            return Err(ExecuteTxError::Internal(format!("{:?}", err)));
-        }
-    };
-    Ok(ExecResultDto {
-        tx_id: result.tx_id.0.to_vec(),
-        block_number: result.block_number,
-        tx_index: result.tx_index,
-        status: result.status,
-        gas_used: result.gas_used,
-        return_data: clamp_return_data(result.return_data),
-    })
+    let payload_len = inspect_payload_len();
+    if payload_len <= MAX_TX_SIZE.saturating_mul(2) {
+        accept_message();
+    }
 }
 
-#[ic_cdk::update]
-fn execute_ic_tx(tx_bytes: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(ExecuteTxError::Rejected(reason));
+fn inspect_method_allowed(method: &str) -> bool {
+    if cfg!(feature = "dev-faucet") && method == "dev_mint" {
+        return true;
     }
-    let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
-    let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
-    let result = match chain::execute_ic_tx(caller_principal, canister_id, tx_bytes) {
+    matches!(
+        method,
+        "submit_eth_tx"
+            | "submit_ic_tx"
+            | "rpc_eth_send_raw_transaction"
+            | "set_auto_mine"
+            | "set_mining_interval_ms"
+            | "set_prune_policy"
+            | "set_pruning_enabled"
+            | "set_ops_config"
+            | "set_l1_block_info_params"
+            | "set_l1_block_info_snapshot"
+            | "prune_blocks"
+            | "produce_block"
+    )
+}
+
+#[allow(deprecated)]
+fn inspect_payload_len() -> usize {
+    ic_cdk::api::call::arg_data_raw_size()
+}
+
+fn map_execute_chain_result(
+    result: Result<chain::ExecResult, chain::ChainError>,
+) -> Result<ExecResultDto, ExecuteTxError> {
+    let result = match result {
         Ok(value) => value,
         Err(chain::ChainError::DecodeFailed) => {
             return Err(ExecuteTxError::InvalidArgument("decode failed".to_string()));
@@ -416,11 +475,18 @@ fn execute_ic_tx(tx_bytes: Vec<u8>) -> Result<ExecResultDto, ExecuteTxError> {
         Err(chain::ChainError::NonceConflict) => {
             return Err(ExecuteTxError::Rejected("nonce conflict".to_string()));
         }
-        Err(chain::ChainError::ExecFailed(_)) => {
-            return Err(ExecuteTxError::Rejected("execution failed".to_string()));
+        Err(chain::ChainError::QueueFull) => {
+            return Err(ExecuteTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(ExecuteTxError::Rejected("sender queue full".to_string()));
+        }
+        Err(chain::ChainError::ExecFailed(err)) => {
+            let code = exec_error_to_code(err.as_ref());
+            return Err(ExecuteTxError::Rejected(code.to_string()));
         }
         Err(err) => {
-            debug_print(format!("execute_ic_tx err: {:?}", err));
+            debug_print(format!("execute_tx err: {:?}", err));
             return Err(ExecuteTxError::Internal(format!("{:?}", err)));
         }
     };
@@ -439,13 +505,16 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
     if let Some(reason) = reject_write_reason() {
         return Err(SubmitTxError::Rejected(reason));
     }
-    let tx_id = match chain::submit_tx(evm_db::chain_data::TxKind::EthSigned, raw_tx) {
+    let tx_id = match chain::submit_tx_in(chain::TxIn::EthSigned(raw_tx)) {
         Ok(value) => value,
         Err(chain::ChainError::TxTooLarge) => {
             return Err(SubmitTxError::InvalidArgument("tx too large".to_string()));
         }
         Err(chain::ChainError::DecodeFailed) => {
             return Err(SubmitTxError::InvalidArgument("decode failed".to_string()));
+        }
+        Err(chain::ChainError::UnsupportedTxKind) => {
+            return Err(SubmitTxError::InvalidArgument("unsupported tx kind".to_string()));
         }
         Err(chain::ChainError::TxAlreadySeen) => {
             return Err(SubmitTxError::Rejected("tx already seen".to_string()));
@@ -461,6 +530,12 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         }
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
+        }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(SubmitTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
             debug_print(format!("submit_eth_tx err: {:?}", err));
@@ -478,13 +553,20 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
     }
     let caller_principal = ic_cdk::api::msg_caller().as_slice().to_vec();
     let canister_id = ic_cdk::api::canister_self().as_slice().to_vec();
-    let tx_id = match chain::submit_ic_tx(caller_principal, canister_id, tx_bytes) {
+    let tx_id = match chain::submit_tx_in(chain::TxIn::IcSynthetic {
+        caller_principal,
+        canister_id,
+        tx_bytes,
+    }) {
         Ok(value) => value,
         Err(chain::ChainError::TxTooLarge) => {
             return Err(SubmitTxError::InvalidArgument("tx too large".to_string()));
         }
         Err(chain::ChainError::DecodeFailed) => {
             return Err(SubmitTxError::InvalidArgument("decode failed".to_string()));
+        }
+        Err(chain::ChainError::UnsupportedTxKind) => {
+            return Err(SubmitTxError::InvalidArgument("unsupported tx kind".to_string()));
         }
         Err(chain::ChainError::TxAlreadySeen) => {
             return Err(SubmitTxError::Rejected("tx already seen".to_string()));
@@ -500,6 +582,12 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         }
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
+        }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(SubmitTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
             debug_print(format!("submit_ic_tx err: {:?}", err));
@@ -689,9 +777,7 @@ fn rpc_eth_block_number() -> u64 {
 
 #[ic_cdk::update]
 fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(reason);
-    }
+    require_manage_write()?;
     let core_policy = evm_db::chain_data::PrunePolicy {
         target_bytes: policy.target_bytes,
         retain_days: policy.retain_days,
@@ -708,9 +794,7 @@ fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
 
 #[ic_cdk::update]
 fn set_pruning_enabled(enabled: bool) -> Result<(), String> {
-    if let Some(reason) = reject_write_reason() {
-        return Err(reason);
-    }
+    require_manage_write()?;
     chain::set_pruning_enabled(enabled).map_err(|_| "set_pruning_enabled failed".to_string())?;
     schedule_prune();
     Ok(())
@@ -776,7 +860,7 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
     if let Some(reason) = reject_write_reason() {
         return Err(SubmitTxError::Rejected(reason));
     }
-    let tx_id = match chain::submit_tx(TxKind::EthSigned, raw_tx) {
+    let tx_id = match chain::submit_tx_in(chain::TxIn::EthSigned(raw_tx)) {
         Ok(value) => value,
         Err(chain::ChainError::TxTooLarge) => {
             return Err(SubmitTxError::InvalidArgument("tx too large".to_string()));
@@ -784,14 +868,29 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
         Err(chain::ChainError::DecodeFailed) => {
             return Err(SubmitTxError::InvalidArgument("decode failed".to_string()));
         }
+        Err(chain::ChainError::UnsupportedTxKind) => {
+            return Err(SubmitTxError::InvalidArgument("unsupported tx kind".to_string()));
+        }
         Err(chain::ChainError::TxAlreadySeen) => {
             return Err(SubmitTxError::Rejected("tx already seen".to_string()));
         }
         Err(chain::ChainError::InvalidFee) => {
             return Err(SubmitTxError::Rejected("invalid fee".to_string()));
         }
+        Err(chain::ChainError::NonceTooLow) => {
+            return Err(SubmitTxError::Rejected("nonce too low".to_string()));
+        }
+        Err(chain::ChainError::NonceGap) => {
+            return Err(SubmitTxError::Rejected("nonce gap".to_string()));
+        }
         Err(chain::ChainError::NonceConflict) => {
             return Err(SubmitTxError::Rejected("nonce conflict".to_string()));
+        }
+        Err(chain::ChainError::QueueFull) => {
+            return Err(SubmitTxError::Rejected("queue full".to_string()));
+        }
+        Err(chain::ChainError::SenderQueueFull) => {
+            return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
             debug_print(format!("rpc_eth_send_raw_transaction err: {:?}", err));
@@ -823,6 +922,7 @@ fn get_ops_status() -> OpsStatusView {
             last_check_ts: ops.last_check_ts,
             mode: mode_to_view(ops.mode),
             safe_stop_latched: ops.safe_stop_latched,
+            l1_fee_fallback_count: ops.l1_fee_fallback_count,
             needs_migration: meta.needs_migration,
             schema_version: meta.schema_version,
         }
@@ -831,12 +931,12 @@ fn get_ops_status() -> OpsStatusView {
 
 #[ic_cdk::update]
 fn set_ops_config(config: OpsConfigView) -> Result<(), String> {
-    require_controller()?;
+    require_manage_write()?;
     if config.critical == 0 {
-        return Err("critical must be > 0".to_string());
+        return Err("input.ops_config.critical.non_positive".to_string());
     }
     if config.critical >= config.low_watermark {
-        return Err("critical must be less than low_watermark".to_string());
+        return Err("input.ops_config.critical.gte_low_watermark".to_string());
     }
     evm_db::stable_state::with_state_mut(|state| {
         let _ = state.ops_config.set(OpsConfigV1 {
@@ -846,6 +946,43 @@ fn set_ops_config(config: OpsConfigView) -> Result<(), String> {
         });
     });
     observe_cycles();
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_l1_block_info_params() -> L1BlockInfoParamsView {
+    with_state(|state| l1_params_to_view(*state.l1_block_info_params.get()))
+}
+
+#[ic_cdk::query]
+fn get_l1_block_info_snapshot() -> L1BlockInfoSnapshotView {
+    with_state(|state| l1_snapshot_to_view(*state.l1_block_info_snapshot.get()))
+}
+
+#[ic_cdk::update]
+fn set_l1_block_info_params(params: L1BlockInfoParamsView) -> Result<(), String> {
+    require_manage_write()?;
+    if !is_valid_l1_spec_id(params.spec_id) {
+        return Err("input.l1_spec.invalid".to_string());
+    }
+    let next = l1_params_from_view(params);
+    evm_db::stable_state::with_state_mut(|state| {
+        let _ = state.l1_block_info_params.set(next);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn set_l1_block_info_snapshot(snapshot: L1BlockInfoSnapshotView) -> Result<(), String> {
+    require_manage_write()?;
+    let producing = with_state(|state| state.chain_state.get().is_producing);
+    if producing {
+        return Err("ops.busy_producing".to_string());
+    }
+    let next = l1_snapshot_from_view(snapshot);
+    evm_db::stable_state::with_state_mut(|state| {
+        let _ = state.l1_block_info_snapshot.set(next);
+    });
     Ok(())
 }
 
@@ -913,10 +1050,8 @@ fn metrics(window: u64) -> MetricsView {
 }
 
 #[ic_cdk::update]
-fn set_auto_mine(enabled: bool) {
-    if reject_write_reason().is_some() {
-        return;
-    }
+fn set_auto_mine(enabled: bool) -> Result<(), String> {
+    require_manage_write()?;
     evm_db::stable_state::with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
         chain_state.auto_mine_enabled = enabled;
@@ -925,15 +1060,14 @@ fn set_auto_mine(enabled: bool) {
     if enabled {
         schedule_mining();
     }
+    Ok(())
 }
 
 #[ic_cdk::update]
-fn set_mining_interval_ms(interval_ms: u64) {
-    if reject_write_reason().is_some() {
-        return;
-    }
+fn set_mining_interval_ms(interval_ms: u64) -> Result<(), String> {
+    require_manage_write()?;
     if interval_ms == 0 {
-        ic_cdk::trap("mining interval must be > 0");
+        return Err("input.mining_interval.non_positive".to_string());
     }
     evm_db::stable_state::with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
@@ -941,11 +1075,12 @@ fn set_mining_interval_ms(interval_ms: u64) {
         state.chain_state.set(chain_state);
     });
     schedule_mining();
+    Ok(())
 }
 
 #[ic_cdk::update]
 fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResultView, ProduceBlockError> {
-    if let Some(reason) = reject_write_reason() {
+    if let Err(reason) = require_manage_write() {
         return Err(ProduceBlockError::Internal(reason));
     }
     match chain::prune_blocks(retain, max_ops) {
@@ -1003,6 +1138,9 @@ fn receipt_to_view(receipt: ReceiptLike) -> ReceiptView {
         status: receipt.status,
         gas_used: receipt.gas_used,
         effective_gas_price: receipt.effective_gas_price,
+        l1_data_fee: receipt.l1_data_fee,
+        operator_fee: receipt.operator_fee,
+        total_fee: receipt.total_fee,
         return_data_hash: receipt.return_data_hash.to_vec(),
         return_data: clamp_return_data(receipt.return_data),
         contract_address: receipt.contract_address.map(|v| v.to_vec()),
@@ -1012,9 +1150,14 @@ fn receipt_to_view(receipt: ReceiptLike) -> ReceiptView {
 
 fn log_to_view(log: evm_db::chain_data::receipt::LogEntry) -> LogView {
     LogView {
-        address: log.address.to_vec(),
-        topics: log.topics.into_iter().map(|t| t.to_vec()).collect(),
-        data: log.data,
+        address: log.address.as_slice().to_vec(),
+        topics: log
+            .data
+            .topics()
+            .iter()
+            .map(|topic| topic.as_slice().to_vec())
+            .collect(),
+        data: log.data.data.to_vec(),
     }
 }
 
@@ -1022,6 +1165,41 @@ fn tx_kind_to_view(kind: TxKind) -> TxKindView {
     match kind {
         TxKind::EthSigned => TxKindView::EthSigned,
         TxKind::IcSynthetic => TxKindView::IcSynthetic,
+        TxKind::OpDeposit => TxKindView::OpDeposit,
+    }
+}
+
+fn exec_error_to_code(err: Option<&evm_core::revm_exec::ExecError>) -> &'static str {
+    use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
+
+    match err {
+        None => "exec.execution.failed",
+        Some(ExecError::Decode(_)) => "exec.decode.failed",
+        Some(ExecError::TxError(OpTransactionError::TxBuildFailed)) => "exec.tx.build_failed",
+        Some(ExecError::TxError(OpTransactionError::TxRejectedByPolicy)) => {
+            "exec.tx.rejected_by_policy"
+        }
+        Some(ExecError::TxError(OpTransactionError::TxPrecheckFailed)) => "exec.tx.precheck_failed",
+        Some(ExecError::TxError(OpTransactionError::TxExecutionFailed)) => {
+            "exec.tx.execution_failed"
+        }
+        Some(ExecError::Revert) => "exec.revert",
+        Some(ExecError::FailedDeposit) => "exec.deposit.failed",
+        Some(ExecError::SystemTxRejected) => "exec.system_tx.rejected",
+        Some(ExecError::SystemTxBackoff) => "exec.system_tx.backoff",
+        Some(ExecError::EvmHalt(OpHaltReason::OutOfGas)) => "exec.halt.out_of_gas",
+        Some(ExecError::EvmHalt(OpHaltReason::InvalidOpcode)) => "exec.halt.invalid_opcode",
+        Some(ExecError::EvmHalt(OpHaltReason::StackOverflow)) => "exec.halt.stack_overflow",
+        Some(ExecError::EvmHalt(OpHaltReason::StackUnderflow)) => "exec.halt.stack_underflow",
+        Some(ExecError::EvmHalt(OpHaltReason::InvalidJump)) => "exec.halt.invalid_jump",
+        Some(ExecError::EvmHalt(OpHaltReason::StateChangeDuringStaticCall)) => {
+            "exec.halt.static_state_change"
+        }
+        Some(ExecError::EvmHalt(OpHaltReason::PrecompileError)) => "exec.halt.precompile_error",
+        Some(ExecError::EvmHalt(OpHaltReason::Unknown)) => "exec.halt.unknown",
+        Some(ExecError::InvalidL1SpecId(_)) => "exec.l1_spec.invalid",
+        Some(ExecError::InvalidGasFee) => "exec.gas_fee.invalid",
+        Some(ExecError::ExecutionFailed) => "exec.execution.failed",
     }
 }
 
@@ -1112,10 +1290,10 @@ fn envelope_to_eth_view(
     let kind = stored.kind;
     let caller = match kind {
         TxKind::IcSynthetic => stored.caller_evm.unwrap_or([0u8; 20]),
-        TxKind::EthSigned => [0u8; 20],
+        TxKind::EthSigned | TxKind::OpDeposit => [0u8; 20],
     };
     let decoded = if let Ok(decoded) =
-        evm_core::tx_decode::decode_tx_view(kind, caller, raw_bytes(&stored.raw))
+        evm_core::tx_decode::decode_tx_view(kind, caller, &stored.raw)
     {
         Some(DecodedTxView {
             from: decoded.from.to_vec(),
@@ -1134,23 +1312,17 @@ fn envelope_to_eth_view(
     Some(EthTxView {
         hash: stored.tx_id.0.to_vec(),
         eth_tx_hash: if kind == TxKind::EthSigned {
-            Some(hash::keccak256(raw_bytes(&stored.raw)).to_vec())
+            Some(hash::keccak256(&stored.raw).to_vec())
         } else {
             None
         },
         kind: tx_kind_to_view(kind),
-        raw: raw_bytes(&stored.raw).clone(),
+        raw: stored.raw.clone(),
         decode_ok: decoded.is_some(),
         decoded,
         block_number,
         tx_index,
     })
-}
-
-fn raw_bytes(raw: &RawTx) -> &Vec<u8> {
-    match raw {
-        RawTx::Eth2718(bytes) | RawTx::IcSynthetic(bytes) => bytes,
-    }
 }
 
 fn receipt_to_eth_view(receipt: ReceiptLike) -> EthReceiptView {
@@ -1161,6 +1333,9 @@ fn receipt_to_eth_view(receipt: ReceiptLike) -> EthReceiptView {
         status: receipt.status,
         gas_used: receipt.gas_used,
         effective_gas_price: receipt.effective_gas_price,
+        l1_data_fee: receipt.l1_data_fee,
+        operator_fee: receipt.operator_fee,
+        total_fee: receipt.total_fee,
         contract_address: receipt.contract_address.map(|v| v.to_vec()),
         logs: receipt.logs.into_iter().map(log_to_view).collect(),
     }
@@ -1174,10 +1349,66 @@ fn mode_to_view(mode: OpsMode) -> OpsModeView {
     }
 }
 
+fn l1_params_to_view(params: L1BlockInfoParamsV1) -> L1BlockInfoParamsView {
+    L1BlockInfoParamsView {
+        spec_id: params.spec_id,
+        empty_ecotone_scalars: params.empty_ecotone_scalars,
+        l1_fee_overhead: params.l1_fee_overhead,
+        l1_base_fee_scalar: params.l1_base_fee_scalar,
+        l1_blob_base_fee_scalar: params.l1_blob_base_fee_scalar,
+        operator_fee_scalar: params.operator_fee_scalar,
+        operator_fee_constant: params.operator_fee_constant,
+    }
+}
+
+fn l1_params_from_view(params: L1BlockInfoParamsView) -> L1BlockInfoParamsV1 {
+    L1BlockInfoParamsV1 {
+        schema_version: 1,
+        spec_id: params.spec_id,
+        empty_ecotone_scalars: params.empty_ecotone_scalars,
+        l1_fee_overhead: params.l1_fee_overhead,
+        l1_base_fee_scalar: params.l1_base_fee_scalar,
+        l1_blob_base_fee_scalar: params.l1_blob_base_fee_scalar,
+        operator_fee_scalar: params.operator_fee_scalar,
+        operator_fee_constant: params.operator_fee_constant,
+    }
+}
+
+fn l1_snapshot_to_view(snapshot: L1BlockInfoSnapshotV1) -> L1BlockInfoSnapshotView {
+    L1BlockInfoSnapshotView {
+        enabled: snapshot.enabled,
+        l1_block_number: snapshot.l1_block_number,
+        l1_base_fee: snapshot.l1_base_fee,
+        l1_blob_base_fee: snapshot.l1_blob_base_fee,
+    }
+}
+
+fn l1_snapshot_from_view(snapshot: L1BlockInfoSnapshotView) -> L1BlockInfoSnapshotV1 {
+    L1BlockInfoSnapshotV1 {
+        schema_version: 1,
+        enabled: snapshot.enabled,
+        l1_block_number: snapshot.l1_block_number,
+        l1_base_fee: snapshot.l1_base_fee,
+        l1_blob_base_fee: snapshot.l1_blob_base_fee,
+    }
+}
+
+fn is_valid_l1_spec_id(spec_id: u8) -> bool {
+    (100..=110).contains(&spec_id)
+}
+
 fn require_controller() -> Result<(), String> {
     let caller = msg_caller();
     if !is_controller(&caller) {
-        return Err("caller is not a controller".to_string());
+        return Err("auth.controller_required".to_string());
+    }
+    Ok(())
+}
+
+fn require_manage_write() -> Result<(), String> {
+    require_controller()?;
+    if let Some(reason) = reject_write_reason() {
+        return Err(reason);
     }
     Ok(())
 }
@@ -1224,10 +1455,10 @@ fn cycle_mode() -> OpsMode {
 
 fn reject_write_reason() -> Option<String> {
     if migration_pending() {
-        return Some("canister needs migration".to_string());
+        return Some("ops.write.needs_migration".to_string());
     }
     if cycle_mode() == OpsMode::Critical {
-        return Some("cycle critical: write operations are paused".to_string());
+        return Some("ops.write.cycle_critical".to_string());
     }
     None
 }
@@ -1370,7 +1601,7 @@ fn mining_tick() {
 
 #[ic_cdk::query]
 fn get_queue_snapshot(limit: u32, cursor: Option<u64>) -> QueueSnapshotView {
-    let limit = usize::try_from(limit).unwrap_or(0);
+    let limit = usize::try_from(limit).unwrap_or(0).min(MAX_QUEUE_SNAPSHOT_LIMIT);
     let snapshot = chain::get_queue_snapshot(limit, cursor);
     let mut items = Vec::with_capacity(snapshot.items.len());
     for item in snapshot.items.into_iter() {
@@ -1395,8 +1626,14 @@ pub fn export_did() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_return_data, tx_id_from_bytes};
+    use super::{
+        clamp_return_data, exec_error_to_code, inspect_method_allowed, is_valid_l1_spec_id,
+        map_execute_chain_result, tx_id_from_bytes, ExecuteTxError,
+    };
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
+    use evm_db::chain_data::TxId;
+    use evm_core::chain::{ChainError, ExecResult};
+    use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
 
     #[test]
     fn clamp_return_data_rejects_oversize() {
@@ -1424,4 +1661,114 @@ mod tests {
         assert_eq!(out.0.to_vec(), input);
     }
 
+    #[test]
+    fn l1_spec_id_validation_accepts_known_range() {
+        assert!(is_valid_l1_spec_id(100));
+        assert!(is_valid_l1_spec_id(110));
+    }
+
+    #[test]
+    fn l1_spec_id_validation_rejects_unknown_values() {
+        assert!(!is_valid_l1_spec_id(99));
+        assert!(!is_valid_l1_spec_id(111));
+    }
+
+    #[test]
+    fn exec_error_codes_match_fixed_pattern() {
+        let inputs = [
+            Some(ExecError::Decode(evm_core::tx_decode::DecodeError::InvalidRlp)),
+            Some(ExecError::TxError(OpTransactionError::TxBuildFailed)),
+            Some(ExecError::TxError(OpTransactionError::TxRejectedByPolicy)),
+            Some(ExecError::TxError(OpTransactionError::TxPrecheckFailed)),
+            Some(ExecError::TxError(OpTransactionError::TxExecutionFailed)),
+            Some(ExecError::Revert),
+            Some(ExecError::FailedDeposit),
+            Some(ExecError::SystemTxRejected),
+            Some(ExecError::SystemTxBackoff),
+            Some(ExecError::EvmHalt(OpHaltReason::OutOfGas)),
+            Some(ExecError::EvmHalt(OpHaltReason::InvalidOpcode)),
+            Some(ExecError::EvmHalt(OpHaltReason::StackOverflow)),
+            Some(ExecError::EvmHalt(OpHaltReason::StackUnderflow)),
+            Some(ExecError::EvmHalt(OpHaltReason::InvalidJump)),
+            Some(ExecError::EvmHalt(OpHaltReason::StateChangeDuringStaticCall)),
+            Some(ExecError::EvmHalt(OpHaltReason::PrecompileError)),
+            Some(ExecError::EvmHalt(OpHaltReason::Unknown)),
+            Some(ExecError::InvalidL1SpecId(99)),
+            Some(ExecError::InvalidGasFee),
+            Some(ExecError::ExecutionFailed),
+            None,
+        ];
+
+        for err in inputs.iter() {
+            let code = exec_error_to_code(err.as_ref());
+            assert!(is_exec_code(code), "unexpected code: {code}");
+            assert!(!code.contains('{'));
+            assert!(!code.contains('}'));
+            assert!(!code.contains(':'));
+        }
+    }
+
+    #[test]
+    fn exec_error_to_code_matches_expected_set() {
+        let code = exec_error_to_code(Some(&ExecError::Revert));
+        assert_eq!(code, "exec.revert");
+        let code = exec_error_to_code(Some(&ExecError::EvmHalt(OpHaltReason::Unknown)));
+        assert_eq!(code, "exec.halt.unknown");
+        let code = exec_error_to_code(Some(&ExecError::TxError(OpTransactionError::TxBuildFailed)));
+        assert_eq!(code, "exec.tx.build_failed");
+    }
+
+    #[test]
+    fn status_zero_exec_result_is_not_rejected() {
+        let result = map_execute_chain_result(Ok(ExecResult {
+            tx_id: TxId([0u8; 32]),
+            block_number: 1,
+            tx_index: 0,
+            status: 0,
+            gas_used: 21_000,
+            return_data: Vec::new(),
+            final_status: "Revert".to_string(),
+        }))
+        .expect("status=0 should still be Ok");
+        assert_eq!(result.status, 0);
+    }
+
+    #[test]
+    fn exec_failed_maps_to_rejected_exec_code() {
+        let err = map_execute_chain_result(Err(ChainError::ExecFailed(Some(ExecError::Revert))))
+            .expect_err("exec failed should be rejected");
+        match err {
+            ExecuteTxError::Rejected(code) => assert_eq!(code, "exec.revert"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_allowlist_accepts_known_methods() {
+        assert!(inspect_method_allowed("submit_ic_tx"));
+        assert!(inspect_method_allowed("set_pruning_enabled"));
+    }
+
+    #[test]
+    fn inspect_allowlist_rejects_unknown_methods() {
+        assert!(!inspect_method_allowed("unknown_method"));
+    }
+
+    #[cfg(feature = "dev-faucet")]
+    #[test]
+    fn inspect_allowlist_accepts_dev_mint_with_feature() {
+        assert!(inspect_method_allowed("dev_mint"));
+    }
+
+    fn is_exec_code(value: &str) -> bool {
+        if !value.starts_with("exec.") {
+            return false;
+        }
+        value.chars().all(|ch| {
+            ch == '.'
+                || ch == '_'
+                || ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+        })
+    }
 }

@@ -12,6 +12,10 @@ pub const MAX_TXS_PER_BLOCK: usize = 1024;
 pub const MAX_TXS_PER_BLOCK_U32: u32 = 1024;
 pub const CHAIN_ID: u64 = 4_801_360;
 pub const READY_CANDIDATE_LIMIT: usize = 256;
+pub const MAX_QUEUE_SNAPSHOT_LIMIT: usize = 1_000;
+pub const MAX_PENDING_GLOBAL: usize = 20_000;
+pub const MAX_PENDING_PER_SENDER: usize = 64;
+pub const MAX_NONCE_WINDOW: u64 = 64;
 
 pub const RECEIPT_CONTRACT_ADDR_LEN: usize = 20;
 pub const RECEIPT_CONTRACT_ADDR_LEN_U32: u32 = 20;
@@ -34,8 +38,6 @@ pub const DEFAULT_BASE_FEE: u64 = 1_000_000_000;
 pub const DEFAULT_MIN_GAS_PRICE: u64 = 0;
 pub const DEFAULT_MIN_PRIORITY_FEE: u64 = 1_000_000_000;
 pub const DEFAULT_BLOCK_GAS_LIMIT: u64 = 15_000_000;
-pub const ELASTICITY_MULTIPLIER: u64 = 2;
-pub const BASE_FEE_MAX_CHANGE_DENOMINATOR: u64 = 8;
 
 // TxLocの固定長
 pub const TX_LOC_SIZE_U32: u32 = 24;
@@ -53,10 +55,21 @@ pub const MAX_LOGS_PER_TX: usize = 64;
 pub const MAX_LOG_TOPICS: usize = 4;
 pub const MAX_LOG_DATA: usize = 4096;
 pub const MAX_LOG_DATA_U32: u32 = 4096;
+pub const RECEIPT_V2_EXTRA_U32: u32 = 8 + 16 + 16 + 16;
 
 // Receiptの最大サイズ（固定部 + 可変部の上限）
 pub const RECEIPT_MAX_SIZE_U32: u32 =
-    32 + 8 + 4 + 1 + 8 + 8 + 4 + (MAX_RETURN_DATA as u32) + 1 + RECEIPT_CONTRACT_ADDR_LEN_U32
+    RECEIPT_V2_EXTRA_U32
+        + 32
+        + 8
+        + 4
+        + 1
+        + 8
+        + 8
+        + 4
+        + (MAX_RETURN_DATA as u32)
+        + 1
+        + RECEIPT_CONTRACT_ADDR_LEN_U32
         + 4
         + (MAX_LOGS_PER_TX as u32)
             * (20 + 4 + (MAX_LOG_TOPICS as u32) * 32 + 4 + MAX_LOG_DATA_U32);

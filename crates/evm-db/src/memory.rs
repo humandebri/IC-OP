@@ -46,6 +46,10 @@ pub enum AppMemoryId {
     CorruptLog = 34,
     OpsConfig = 35,
     OpsState = 36,
+    L1BlockInfoParams = 37,
+    L1BlockInfoSnapshot = 38,
+    OpsMetrics = 39,
+    SystemTxHealth = 40,
 }
 
 impl AppMemoryId {
@@ -88,6 +92,10 @@ impl AppMemoryId {
             AppMemoryId::CorruptLog => 34,
             AppMemoryId::OpsConfig => 35,
             AppMemoryId::OpsState => 36,
+            AppMemoryId::L1BlockInfoParams => 37,
+            AppMemoryId::L1BlockInfoSnapshot => 38,
+            AppMemoryId::OpsMetrics => 39,
+            AppMemoryId::SystemTxHealth => 40,
         }
     }
 

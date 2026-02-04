@@ -40,19 +40,15 @@ Overlay（RAM差分）→ commit（順序固定）
 
 stable state versioning（upgrade耐性）
 
-1.2 実行API（ここをPhase1の主役にする）
+1.2 実行API（submit中心）
 
-今の submit_* + produce_block だけだと「同期っぽさ」が弱いので、これを追加。
+同期即時実行レーンは廃止し、書き込みは submit_* + produce_block に統一する。
 
-update execute_ic_tx(...) -> ExecResult
+update submit_ic_tx(...) -> tx_id
+update submit_eth_tx(raw_tx) -> tx_id
+update produce_block(max_txs) -> ProduceBlockStatus
 
-内部で enqueue -> produce_block(1) 相当を実行
-
-return_data は上限付き（超えたらhashだけ）
-
-update execute_eth_raw_tx(raw_tx) -> ExecResult（同様）
-
-※ これがあると「ICPからコントラクトを“関数呼び出し”」が成立する。
+※ 同期実行APIは提供しない。書き込みは `submit_* + produce_block` に統一する。
 
 1.3 最小のブロック/Tx/Receipt保存
 
@@ -122,7 +118,7 @@ IIガスレス標準：IIログイン→ERC20/NFT操作がボタンで完了
 
 サンプルdapp（フロント＋ICP canister＋EVM contract）
 
-SDK（TSで execute_ic_tx を叩く薄いクライアント）
+SDK（TSで submit_ic_tx + produce_block を叩く薄いクライアント）
 
 Phase 3: L1アンカー＋trusted bridge（L2“体験”フェーズ）
 

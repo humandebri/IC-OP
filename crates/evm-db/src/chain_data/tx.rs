@@ -1,16 +1,17 @@
 //! どこで: Phase1のTxモデル / 何を: StoredTxBytesとID / なぜ: stableは生bytesを安全に保持するため
 
+use crate::corrupt_log::record_corrupt;
 use crate::chain_data::constants::{
-    MAX_PRINCIPAL_LEN, MAX_TX_SIZE, TX_ID_LEN, TX_ID_LEN_U32, MAX_TX_SIZE_U32,
+    MAX_PRINCIPAL_LEN, MAX_TX_SIZE, MAX_TX_SIZE_U32, TX_ID_LEN, TX_ID_LEN_U32,
 };
 use crate::decode::hash_to_array;
-use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 use tiny_keccak::{Hasher, Keccak};
 
 const MAX_STORED_PRINCIPAL_LEN: usize = 64;
+const STORED_TX_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TxId(pub [u8; TX_ID_LEN]);
@@ -45,6 +46,7 @@ impl Storable for TxId {
 pub enum TxKind {
     EthSigned,
     IcSynthetic,
+    OpDeposit,
 }
 
 impl TxKind {
@@ -52,6 +54,7 @@ impl TxKind {
         match self {
             TxKind::EthSigned => 0x01,
             TxKind::IcSynthetic => 0x02,
+            TxKind::OpDeposit => 0x03,
         }
     }
 
@@ -59,16 +62,10 @@ impl TxKind {
         match value {
             0x01 => Some(TxKind::EthSigned),
             0x02 => Some(TxKind::IcSynthetic),
+            0x03 => Some(TxKind::OpDeposit),
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FeeFields {
-    pub max_fee_per_gas: u128,
-    pub max_priority_fee_per_gas: u128,
-    pub is_dynamic_fee: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,7 +77,9 @@ pub struct StoredTxBytes {
     pub caller_evm: Option<[u8; 20]>,
     pub canister_id: Vec<u8>,
     pub caller_principal: Vec<u8>,
-    pub fee: FeeFields,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub is_dynamic_fee: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,19 +91,15 @@ pub enum StoredTxBytesError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RawTx {
-    Eth2718(Vec<u8>),
-    IcSynthetic(Vec<u8>),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredTx {
     pub kind: TxKind,
-    pub raw: RawTx,
+    pub raw: Vec<u8>,
     pub caller_evm: Option<[u8; 20]>,
     pub canister_id: Vec<u8>,
     pub caller_principal: Vec<u8>,
-    pub fee: FeeFields,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub is_dynamic_fee: bool,
     pub tx_id: TxId,
 }
 
@@ -131,18 +126,16 @@ impl StoredTxBytes {
         is_dynamic_fee: bool,
     ) -> Self {
         Self {
-            version: 2,
+            version: STORED_TX_VERSION,
             tx_id,
             kind,
             raw,
             caller_evm,
             canister_id,
             caller_principal,
-            fee: FeeFields {
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
-                is_dynamic_fee,
-            },
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            is_dynamic_fee,
         }
     }
 
@@ -164,18 +157,18 @@ impl StoredTxBytes {
 
     pub fn fee_fields(&self) -> (u128, u128, bool) {
         (
-            self.fee.max_fee_per_gas,
-            self.fee.max_priority_fee_per_gas,
-            self.fee.is_dynamic_fee,
+            self.max_fee_per_gas,
+            self.max_priority_fee_per_gas,
+            self.is_dynamic_fee,
         )
     }
 
     pub fn is_invalid(&self) -> bool {
-        self.raw.is_empty() || self.version != 2
+        self.raw.is_empty() || self.version != STORED_TX_VERSION
     }
 
     pub fn validate(&self) -> Result<(), StoredTxError> {
-        if self.version != 2 {
+        if self.version != STORED_TX_VERSION {
             return Err(StoredTxError::UnsupportedVersion(self.version));
         }
         if self.raw.is_empty() {
@@ -189,7 +182,7 @@ impl TryFrom<StoredTxBytes> for StoredTx {
     type Error = StoredTxError;
 
     fn try_from(value: StoredTxBytes) -> Result<Self, Self::Error> {
-        if value.version != 2 {
+        if value.version != STORED_TX_VERSION {
             return Err(StoredTxError::UnsupportedVersion(value.version));
         }
         if value.raw.is_empty() {
@@ -203,7 +196,7 @@ impl TryFrom<StoredTxBytes> for StoredTx {
         {
             return Err(StoredTxError::MissingPrincipal);
         }
-        if value.kind == TxKind::EthSigned
+        if value.kind != TxKind::IcSynthetic
             && (!value.canister_id.is_empty() || !value.caller_principal.is_empty())
         {
             return Err(StoredTxError::MissingPrincipal);
@@ -232,17 +225,15 @@ impl TryFrom<StoredTxBytes> for StoredTx {
                 return Err(StoredTxError::CallerMismatch);
             }
         }
-        let raw = match value.kind {
-            TxKind::EthSigned => RawTx::Eth2718(value.raw),
-            TxKind::IcSynthetic => RawTx::IcSynthetic(value.raw),
-        };
         Ok(StoredTx {
             kind: value.kind,
-            raw,
+            raw: value.raw,
             caller_evm: value.caller_evm,
             canister_id: value.canister_id,
             caller_principal: value.caller_principal,
-            fee: value.fee,
+            max_fee_per_gas: value.max_fee_per_gas,
+            max_priority_fee_per_gas: value.max_priority_fee_per_gas,
+            is_dynamic_fee: value.is_dynamic_fee,
             tx_id: value.tx_id,
         })
     }
@@ -304,11 +295,9 @@ fn invalid_stored_tx(version: u8, raw: &[u8]) -> StoredTxBytes {
         caller_evm: None,
         canister_id: Vec::new(),
         caller_principal: Vec::new(),
-        fee: FeeFields {
-            max_fee_per_gas: 0,
-            max_priority_fee_per_gas: 0,
-            is_dynamic_fee: false,
-        },
+        max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
+        is_dynamic_fee: false,
     }
 }
 
@@ -341,14 +330,14 @@ fn encode(inner: &StoredTxBytes) -> Vec<u8> {
     if inner.caller_evm.is_some() {
         flags |= 1 << 0;
     }
-    if inner.fee.is_dynamic_fee {
+    if inner.is_dynamic_fee {
         flags |= 1 << 1;
     }
     out.push(flags);
     let caller = inner.caller_evm.unwrap_or([0u8; 20]);
     out.extend_from_slice(&caller);
-    out.extend_from_slice(&inner.fee.max_fee_per_gas.to_be_bytes());
-    out.extend_from_slice(&inner.fee.max_priority_fee_per_gas.to_be_bytes());
+    out.extend_from_slice(&inner.max_fee_per_gas.to_be_bytes());
+    out.extend_from_slice(&inner.max_priority_fee_per_gas.to_be_bytes());
     let canister_len =
         u16::try_from(inner.canister_id.len()).unwrap_or_else(|_| ic_cdk::trap("tx_envelope: canister_id len overflow"));
     out.extend_from_slice(&canister_len.to_be_bytes());
@@ -368,7 +357,7 @@ fn decode_result(data: &[u8]) -> Result<StoredTxBytes, DecodeFailure<'_>> {
         return Err(DecodeFailure { raw: data });
     }
     let version = data[0];
-    if version != 2 {
+    if version != STORED_TX_VERSION {
         return Err(DecodeFailure { raw: data });
     }
     let mut offset = 1;
@@ -441,11 +430,9 @@ fn decode_result(data: &[u8]) -> Result<StoredTxBytes, DecodeFailure<'_>> {
         caller_evm,
         canister_id,
         caller_principal,
-        fee: FeeFields {
-            max_fee_per_gas: u128::from_be_bytes(max_fee),
-            max_priority_fee_per_gas: u128::from_be_bytes(max_priority),
-            is_dynamic_fee,
-        },
+        max_fee_per_gas: u128::from_be_bytes(max_fee),
+        max_priority_fee_per_gas: u128::from_be_bytes(max_priority),
+        is_dynamic_fee,
     })
 }
 

@@ -5,20 +5,63 @@ use crate::revm_db::RevmStableDb;
 use crate::tx_decode::DecodeError;
 use evm_db::chain_data::constants::{CHAIN_ID, DEFAULT_BLOCK_GAS_LIMIT};
 use evm_db::chain_data::receipt::LogEntry;
-use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry};
-use evm_db::stable_state::{with_state, with_state_mut};
+use evm_db::chain_data::{
+    L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, ReceiptLike, TxId, TxIndexEntry, TxKind,
+};
+use evm_db::stable_state::with_state_mut;
 use ic_stable_structures::Storable;
-use revm::context::{BlockEnv, Context};
-use revm::handler::{ExecuteCommitEvm, ExecuteEvm, MainBuilder};
-use revm::handler::MainnetContext;
-use revm::primitives::{hardfork::SpecId, Address, B256, U256};
-use revm::context_interface::result::ExecutionResult;
+use op_revm::constants::L1_BLOCK_CONTRACT;
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use op_revm::{
+    DefaultOp, L1BlockInfo, OpBuilder, OpContext, OpHaltReason as RevmOpHaltReason, OpSpecId,
+    OpTransaction, OpTransactionError as RevmOpTransactionError,
+};
+use revm::context::{BlockEnv, TxEnv};
+use revm::context_interface::result::{EVMError, ExecutionResult, HaltReason};
+use revm::database_interface::DatabaseCommit;
+use revm::handler::{ExecuteCommitEvm, ExecuteEvm, SystemCallEvm};
+use revm::primitives::{Address, Bytes, B256, U256};
+
+pub(crate) type StateDiff = revm::primitives::HashMap<Address, revm::state::Account>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecError {
     Decode(DecodeError),
-    ExecutionFailed(String),
+    TxError(OpTransactionError),
+    Revert,
+    FailedDeposit,
+    SystemTxRejected,
+    SystemTxBackoff,
+    EvmHalt(OpHaltReason),
+    InvalidL1SpecId(u8),
+    ExecutionFailed,
     InvalidGasFee,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpTransactionError {
+    TxBuildFailed,
+    TxRejectedByPolicy,
+    TxPrecheckFailed,
+    TxExecutionFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpHaltReason {
+    OutOfGas,
+    InvalidOpcode,
+    StackOverflow,
+    StackUnderflow,
+    InvalidJump,
+    StateChangeDuringStaticCall,
+    PrecompileError,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecPath {
+    UserTx,
+    SystemTx,
 }
 
 pub struct ExecOutcome {
@@ -26,79 +69,318 @@ pub struct ExecOutcome {
     pub tx_index: u32,
     pub receipt: ReceiptLike,
     pub return_data: Vec<u8>,
-    pub state_change_hash: [u8; 32],
+    pub final_status: String,
+    pub halt_reason: Option<OpHaltReason>,
+    pub l1_fee_fallback_used: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockExecContext {
+    pub block_number: u64,
+    pub timestamp: u64,
+    pub base_fee: u64,
+    pub l1_params: L1BlockInfoParamsV1,
+    pub l1_snapshot: L1BlockInfoSnapshotV1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FeeBreakdown {
+    l1_data_fee: u128,
+    operator_fee: u128,
+    fallback_used: bool,
+}
+
+impl FeeBreakdown {
+    fn total_fee(self, effective_gas_price: u64, gas_used: u64) -> u128 {
+        let l2_fee = u128::from(gas_used).saturating_mul(u128::from(effective_gas_price));
+        l2_fee
+            .saturating_add(self.l1_data_fee)
+            .saturating_add(self.operator_fee)
+    }
 }
 
 pub fn execute_tx(
     tx_id: TxId,
     tx_index: u32,
+    tx_kind: TxKind,
+    raw_tx: &[u8],
     tx_env: revm::context::TxEnv,
-    block_number: u64,
-    timestamp: u64,
+    exec_ctx: &BlockExecContext,
+    exec_path: ExecPath,
 ) -> Result<ExecOutcome, ExecError> {
-    let base_fee = with_state(|state| state.chain_state.get().base_fee);
-    let max_fee = tx_env.gas_price;
-    let max_priority = tx_env.gas_priority_fee.unwrap_or(0);
-    let effective_gas_price =
-        compute_effective_gas_price(max_fee, max_priority, base_fee).ok_or(ExecError::InvalidGasFee)?;
-    let db = RevmStableDb;
-    let mut ctx: MainnetContext<RevmStableDb> = Context::new(db, SpecId::CANCUN);
-    let block = BlockEnv {
-        number: U256::from(block_number),
-        timestamp: U256::from(timestamp),
-        gas_limit: DEFAULT_BLOCK_GAS_LIMIT,
-        basefee: base_fee,
-        ..Default::default()
-    };
-    ctx.block = block;
+    let (outcome, _state_diff, _db) = execute_tx_on(
+        RevmStableDb,
+        tx_id,
+        tx_index,
+        tx_kind,
+        raw_tx,
+        tx_env,
+        exec_ctx,
+        exec_path,
+        true,
+    )?;
+    Ok(outcome)
+}
 
-    ctx.cfg.chain_id = CHAIN_ID;
-    let mut evm = ctx.build_mainnet();
-    let result = evm
-        .transact(tx_env)
-        .map_err(|err| ExecError::ExecutionFailed(format!("{:?}", err)))?;
-    let state = result.state;
-    let state_change_hash = compute_tx_change_hash(&state);
-    evm.commit(state);
+pub(crate) fn execute_tx_on<DB>(
+    db: DB,
+    tx_id: TxId,
+    tx_index: u32,
+    tx_kind: TxKind,
+    raw_tx: &[u8],
+    tx_env: revm::context::TxEnv,
+    exec_ctx: &BlockExecContext,
+    exec_path: ExecPath,
+    persist_receipt_index: bool,
+) -> Result<(ExecOutcome, StateDiff, DB), ExecError>
+where
+    DB: revm::database_interface::Database<Error = core::convert::Infallible> + DatabaseCommit,
+{
+    if exec_path == ExecPath::SystemTx {
+        return Err(ExecError::SystemTxRejected);
+    }
+    let spec =
+        op_spec_id_from_u8(exec_ctx.l1_params.spec_id).map_err(ExecError::InvalidL1SpecId)?;
+    let effective_gas_price = compute_effective_gas_price(
+        tx_env.gas_price,
+        tx_env.gas_priority_fee.unwrap_or(0),
+        exec_ctx.base_fee,
+    )
+    .ok_or(ExecError::InvalidGasFee)?;
+    let mut evm = build_op_context(exec_ctx, spec, db).build_op();
+    let op_tx = build_op_transaction(tx_kind, raw_tx, tx_env, exec_path)?;
+    let result = evm.transact(op_tx).map_err(map_tx_error_stage)?;
+    let state_diff = collect_state_diff(result.state);
+    commit_state_diff(&mut evm, state_diff.clone());
 
-    let (status, gas_used, output, contract_address, logs) = match result.result {
-        ExecutionResult::Success {
-            gas_used,
-            output,
-            logs,
-            ..
-        } => {
-            let addr = output.address().map(|a| address_to_bytes(*a));
-            let mapped = logs
-                .into_iter()
-                .map(|log| LogEntry {
-                    address: address_to_bytes(log.address),
-                    topics: log.topics().iter().map(|t| t.0).collect(),
-                    data: log.data.data.to_vec(),
-                })
-                .collect::<Vec<_>>();
-            (1u8, gas_used, output.data().as_ref().to_vec(), addr, mapped)
-        }
-        ExecutionResult::Revert { gas_used, output } => {
-            (0u8, gas_used, output.to_vec(), None, Vec::new())
-        }
-        ExecutionResult::Halt { gas_used, .. } => (0u8, gas_used, Vec::new(), None, Vec::new()),
-    };
+    let (status, gas_used, output, contract_address, logs, final_status, halt_reason) =
+        match result.result {
+            ExecutionResult::Success {
+                gas_used,
+                output,
+                logs,
+                ..
+            } => {
+                let addr = output.address().map(|a| address_to_bytes(*a));
+                let mapped = logs
+                    .into_iter()
+                    .map(revm_log_to_receipt_log)
+                    .collect::<Vec<_>>();
+                (
+                    1u8,
+                    gas_used,
+                    output.data().as_ref().to_vec(),
+                    addr,
+                    mapped,
+                    "Success".to_string(),
+                    None,
+                )
+            }
+            ExecutionResult::Revert { gas_used, output } => (
+                0u8,
+                gas_used,
+                output.to_vec(),
+                None,
+                Vec::new(),
+                "Revert".to_string(),
+                None,
+            ),
+            ExecutionResult::Halt { gas_used, reason } => {
+                let fixed = map_halt_reason(reason);
+                (
+                    0u8,
+                    gas_used,
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    format!("Halt:{fixed:?}"),
+                    Some(fixed),
+                )
+            }
+        };
+    let fee_breakdown = compute_fee_breakdown(raw_tx, gas_used, spec, exec_ctx);
 
     let return_data_hash = keccak256(&output);
     let receipt = ReceiptLike {
         tx_id,
-        block_number,
+        block_number: exec_ctx.block_number,
         tx_index,
         status,
         gas_used,
         effective_gas_price,
+        l1_data_fee: fee_breakdown.l1_data_fee,
+        operator_fee: fee_breakdown.operator_fee,
+        total_fee: fee_breakdown.total_fee(effective_gas_price, gas_used),
         return_data_hash,
         return_data: output.clone(),
         contract_address,
         logs,
     };
 
+    if persist_receipt_index {
+        // User tx only: system tx accounting must not create receipt/index entries.
+        store_receipt_index(tx_id, exec_ctx.block_number, tx_index, &receipt);
+    }
+
+    let outcome = ExecOutcome {
+        tx_id,
+        tx_index,
+        receipt,
+        return_data: output,
+        final_status,
+        halt_reason,
+        l1_fee_fallback_used: fee_breakdown.fallback_used,
+    };
+    let ctx = evm.into_context();
+    let db = ctx.journaled_state.database;
+    Ok((outcome, state_diff, db))
+}
+
+pub fn execute_l1_block_info_system_tx(exec_ctx: &BlockExecContext) -> Result<(), ExecError> {
+    let (_state_diff, _db) = execute_l1_block_info_system_tx_on(RevmStableDb, exec_ctx)?;
+    Ok(())
+}
+
+pub(crate) fn execute_l1_block_info_system_tx_on<DB>(
+    db: DB,
+    exec_ctx: &BlockExecContext,
+) -> Result<(StateDiff, DB), ExecError>
+where
+    DB: revm::database_interface::Database<Error = core::convert::Infallible> + DatabaseCommit,
+{
+    let spec =
+        op_spec_id_from_u8(exec_ctx.l1_params.spec_id).map_err(ExecError::InvalidL1SpecId)?;
+    let mut evm = build_op_context(exec_ctx, spec, db).build_op();
+    let call_data = build_l1blockinfo_calldata(spec, exec_ctx)?;
+    let result = evm
+        .system_call(L1_BLOCK_CONTRACT, call_data)
+        .map_err(|_| ExecError::TxError(OpTransactionError::TxExecutionFailed))?;
+    match result.result {
+        ExecutionResult::Success { .. } => {}
+        ExecutionResult::Revert { .. } => return Err(ExecError::Revert),
+        ExecutionResult::Halt { reason, .. } => {
+            if reason == RevmOpHaltReason::FailedDeposit {
+                return Err(ExecError::FailedDeposit);
+            }
+            let fixed = map_halt_reason(reason);
+            return Err(ExecError::EvmHalt(fixed));
+        }
+    }
+    let state_diff = collect_state_diff(result.state);
+    commit_state_diff(&mut evm, state_diff.clone());
+    let ctx = evm.into_context();
+    let db = ctx.journaled_state.database;
+    Ok((state_diff, db))
+}
+
+pub(crate) fn commit_state_diff_to_db(state: StateDiff) {
+    let mut db = RevmStableDb;
+    db.commit(state);
+}
+
+fn build_l1blockinfo_calldata(
+    spec: OpSpecId,
+    exec_ctx: &BlockExecContext,
+) -> Result<Bytes, ExecError> {
+    if spec.is_enabled_in(OpSpecId::ECOTONE) {
+        Ok(build_l1blockinfo_calldata_v2(exec_ctx))
+    } else {
+        Ok(build_l1blockinfo_calldata_v1(exec_ctx))
+    }
+}
+
+fn build_l1blockinfo_calldata_v1(exec_ctx: &BlockExecContext) -> Bytes {
+    // setL1BlockValues(uint64,uint64,uint256,bytes32,uint64,bytes32,uint256,uint256)
+    let selector_hash = keccak256(
+        b"setL1BlockValues(uint64,uint64,uint256,bytes32,uint64,bytes32,uint256,uint256)",
+    );
+    let mut out = Vec::with_capacity(4 + 8 * 32);
+    out.extend_from_slice(&selector_hash[..4]);
+    // arg0: Optimism L1 block number
+    push_u64_word(&mut out, exec_ctx.l1_snapshot.l1_block_number);
+    push_u64_word(&mut out, exec_ctx.timestamp);
+    push_u256_word(&mut out, U256::from(exec_ctx.l1_snapshot.l1_base_fee));
+    push_b256_word(&mut out, B256::ZERO);
+    push_u64_word(&mut out, 0);
+    push_b256_word(&mut out, B256::ZERO);
+    push_u256_word(&mut out, U256::from(exec_ctx.l1_params.l1_fee_overhead));
+    push_u256_word(&mut out, U256::from(exec_ctx.l1_params.l1_base_fee_scalar));
+    Bytes::from(out)
+}
+
+fn build_l1blockinfo_calldata_v2(exec_ctx: &BlockExecContext) -> Bytes {
+    // setL1BlockValuesEcotone(uint32,uint32,uint64,uint64,uint64,uint256,uint256,bytes32,bytes32)
+    let selector_hash = keccak256(
+        b"setL1BlockValuesEcotone(uint32,uint32,uint64,uint64,uint64,uint256,uint256,bytes32,bytes32)",
+    );
+    let mut out = Vec::with_capacity(4 + 9 * 32);
+    out.extend_from_slice(&selector_hash[..4]);
+    push_u32_word(
+        &mut out,
+        u32::try_from(exec_ctx.l1_params.l1_base_fee_scalar).unwrap_or(u32::MAX),
+    );
+    push_u32_word(
+        &mut out,
+        u32::try_from(exec_ctx.l1_params.l1_blob_base_fee_scalar).unwrap_or(u32::MAX),
+    );
+    push_u64_word(&mut out, 0); // sequence number
+    push_u64_word(&mut out, exec_ctx.timestamp);
+    // arg4: Optimism L1 block number
+    push_u64_word(&mut out, exec_ctx.l1_snapshot.l1_block_number);
+    push_u256_word(&mut out, U256::from(exec_ctx.l1_snapshot.l1_base_fee));
+    push_u256_word(&mut out, U256::from(exec_ctx.l1_snapshot.l1_blob_base_fee));
+    push_b256_word(&mut out, B256::ZERO);
+    push_b256_word(&mut out, B256::ZERO);
+    Bytes::from(out)
+}
+
+fn push_u32_word(out: &mut Vec<u8>, value: u32) {
+    let mut word = [0u8; 32];
+    word[28..32].copy_from_slice(&value.to_be_bytes());
+    out.extend_from_slice(&word);
+}
+
+fn push_u64_word(out: &mut Vec<u8>, value: u64) {
+    let mut word = [0u8; 32];
+    word[24..32].copy_from_slice(&value.to_be_bytes());
+    out.extend_from_slice(&word);
+}
+
+fn push_u256_word(out: &mut Vec<u8>, value: U256) {
+    out.extend_from_slice(&value.to_be_bytes::<32>());
+}
+
+fn push_b256_word(out: &mut Vec<u8>, value: B256) {
+    out.extend_from_slice(value.as_ref());
+}
+
+fn build_op_context<DB>(exec_ctx: &BlockExecContext, spec: OpSpecId, db: DB) -> OpContext<DB>
+where
+    DB: revm::database_interface::Database,
+{
+    let mut ctx: OpContext<DB> = OpContext::op().with_db(db);
+    ctx.block = BlockEnv {
+        number: U256::from(exec_ctx.block_number),
+        timestamp: U256::from(exec_ctx.timestamp),
+        gas_limit: DEFAULT_BLOCK_GAS_LIMIT,
+        basefee: exec_ctx.base_fee,
+        ..Default::default()
+    };
+    ctx.cfg.chain_id = CHAIN_ID;
+    ctx.cfg.spec = spec;
+    ctx.chain = l1_block_info_from_context(exec_ctx);
+    ctx
+}
+
+fn collect_state_diff(state: StateDiff) -> StateDiff {
+    state
+}
+
+fn commit_state_diff(evm: &mut impl ExecuteCommitEvm<State = StateDiff>, state: StateDiff) {
+    evm.commit(state);
+}
+
+fn store_receipt_index(tx_id: TxId, block_number: u64, tx_index: u32, receipt: &ReceiptLike) {
     with_state_mut(|state| {
         let entry = TxIndexEntry {
             block_number,
@@ -117,14 +399,153 @@ pub fn execute_tx(
         state.tx_index.insert(tx_id, entry_ptr);
         state.receipts.insert(tx_id, receipt_ptr);
     });
+}
 
-    Ok(ExecOutcome {
-        tx_id,
-        tx_index,
-        receipt,
-        return_data: output,
-        state_change_hash,
-    })
+fn build_op_transaction(
+    tx_kind: TxKind,
+    raw_tx: &[u8],
+    tx_env: TxEnv,
+    exec_path: ExecPath,
+) -> Result<OpTransaction<TxEnv>, ExecError> {
+    let base = TxEnv::builder()
+        .tx_type(Some(tx_env.tx_type))
+        .caller(tx_env.caller)
+        .gas_limit(tx_env.gas_limit)
+        .gas_price(tx_env.gas_price)
+        .kind(tx_env.kind)
+        .value(tx_env.value)
+        .data(tx_env.data)
+        .nonce(tx_env.nonce)
+        .chain_id(tx_env.chain_id)
+        .access_list(tx_env.access_list)
+        .gas_priority_fee(tx_env.gas_priority_fee)
+        .blob_hashes(tx_env.blob_hashes)
+        .max_fee_per_blob_gas(tx_env.max_fee_per_blob_gas)
+        .authorization_list(tx_env.authorization_list);
+
+    if tx_kind == TxKind::OpDeposit || tx_env.tx_type == DEPOSIT_TRANSACTION_TYPE {
+        return Err(match exec_path {
+            ExecPath::UserTx => ExecError::FailedDeposit,
+            ExecPath::SystemTx => ExecError::SystemTxRejected,
+        });
+    }
+
+    OpTransaction::builder()
+        .base(base)
+        .enveloped_tx(Some(raw_tx.to_vec().into()))
+        .build()
+        .map_err(|_| ExecError::TxError(OpTransactionError::TxBuildFailed))
+}
+
+fn compute_fee_breakdown(
+    raw_tx: &[u8],
+    gas_used: u64,
+    spec: OpSpecId,
+    exec_ctx: &BlockExecContext,
+) -> FeeBreakdown {
+    if !exec_ctx.l1_snapshot.enabled {
+        return FeeBreakdown {
+            l1_data_fee: 0,
+            operator_fee: 0,
+            fallback_used: true,
+        };
+    }
+    let mut l1_block_info = l1_block_info_from_context(exec_ctx);
+    let l1_data_fee = saturating_u256_to_u128(l1_block_info.calculate_tx_l1_cost(raw_tx, spec));
+    let operator_fee = if spec.is_enabled_in(OpSpecId::ISTHMUS) {
+        saturating_u256_to_u128(l1_block_info.operator_fee_charge(
+            raw_tx,
+            U256::from(gas_used),
+            spec,
+        ))
+    } else {
+        0
+    };
+    FeeBreakdown {
+        l1_data_fee,
+        operator_fee,
+        fallback_used: false,
+    }
+}
+
+fn l1_block_info_from_context(exec_ctx: &BlockExecContext) -> L1BlockInfo {
+    L1BlockInfo {
+        // upstream type keeps the field name `l2_block`, but semantically this value is L1 block number.
+        l2_block: Some(U256::from(exec_ctx.l1_snapshot.l1_block_number)),
+        l1_base_fee: U256::from(exec_ctx.l1_snapshot.l1_base_fee),
+        l1_fee_overhead: Some(U256::from(exec_ctx.l1_params.l1_fee_overhead)),
+        l1_base_fee_scalar: U256::from(exec_ctx.l1_params.l1_base_fee_scalar),
+        l1_blob_base_fee: Some(U256::from(exec_ctx.l1_snapshot.l1_blob_base_fee)),
+        l1_blob_base_fee_scalar: Some(U256::from(exec_ctx.l1_params.l1_blob_base_fee_scalar)),
+        operator_fee_scalar: Some(U256::from(exec_ctx.l1_params.operator_fee_scalar)),
+        operator_fee_constant: Some(U256::from(exec_ctx.l1_params.operator_fee_constant)),
+        da_footprint_gas_scalar: None,
+        empty_ecotone_scalars: exec_ctx.l1_params.empty_ecotone_scalars,
+        tx_l1_cost: None,
+    }
+}
+
+fn op_spec_id_from_u8(value: u8) -> Result<OpSpecId, u8> {
+    match value {
+        100 => Ok(OpSpecId::BEDROCK),
+        101 => Ok(OpSpecId::REGOLITH),
+        102 => Ok(OpSpecId::CANYON),
+        103 => Ok(OpSpecId::ECOTONE),
+        104 => Ok(OpSpecId::FJORD),
+        105 => Ok(OpSpecId::GRANITE),
+        106 => Ok(OpSpecId::HOLOCENE),
+        107 => Ok(OpSpecId::ISTHMUS),
+        108 => Ok(OpSpecId::JOVIAN),
+        109 => Ok(OpSpecId::INTEROP),
+        110 => Ok(OpSpecId::OSAKA),
+        _ => Err(value),
+    }
+}
+
+fn map_halt_reason(reason: RevmOpHaltReason) -> OpHaltReason {
+    match reason {
+        RevmOpHaltReason::FailedDeposit => OpHaltReason::Unknown,
+        RevmOpHaltReason::Base(base) => match base {
+            HaltReason::OutOfGas(_) => OpHaltReason::OutOfGas,
+            HaltReason::OpcodeNotFound | HaltReason::InvalidFEOpcode => OpHaltReason::InvalidOpcode,
+            HaltReason::StackOverflow => OpHaltReason::StackOverflow,
+            HaltReason::StackUnderflow => OpHaltReason::StackUnderflow,
+            HaltReason::InvalidJump => OpHaltReason::InvalidJump,
+            HaltReason::StateChangeDuringStaticCall | HaltReason::CallNotAllowedInsideStatic => {
+                OpHaltReason::StateChangeDuringStaticCall
+            }
+            HaltReason::PrecompileError | HaltReason::PrecompileErrorWithContext(_) => {
+                OpHaltReason::PrecompileError
+            }
+            _ => OpHaltReason::Unknown,
+        },
+    }
+}
+
+fn map_tx_error_stage(
+    error: EVMError<core::convert::Infallible, RevmOpTransactionError>,
+) -> ExecError {
+    match error {
+        EVMError::Transaction(tx_err) => match tx_err {
+            RevmOpTransactionError::DepositSystemTxPostRegolith => {
+                ExecError::TxError(OpTransactionError::TxRejectedByPolicy)
+            }
+            RevmOpTransactionError::HaltedDepositPostRegolith => ExecError::FailedDeposit,
+            RevmOpTransactionError::MissingEnvelopedTx => {
+                ExecError::TxError(OpTransactionError::TxBuildFailed)
+            }
+            RevmOpTransactionError::Base(_) => {
+                ExecError::TxError(OpTransactionError::TxPrecheckFailed)
+            }
+        },
+        EVMError::Header(_) => ExecError::TxError(OpTransactionError::TxPrecheckFailed),
+        EVMError::Database(_) => ExecError::TxError(OpTransactionError::TxExecutionFailed),
+        EVMError::Custom(_) => ExecError::TxError(OpTransactionError::TxExecutionFailed),
+    }
+}
+
+fn saturating_u256_to_u128(value: U256) -> u128 {
+    u128::try_from(value).unwrap_or(u128::MAX)
 }
 
 fn address_to_bytes(address: revm::primitives::Address) -> [u8; 20] {
@@ -133,66 +554,15 @@ fn address_to_bytes(address: revm::primitives::Address) -> [u8; 20] {
     out
 }
 
-fn b256_to_bytes(hash: B256) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(hash.as_ref());
-    out
-}
-
-fn u256_to_bytes(value: U256) -> [u8; 32] {
-    value.to_be_bytes()
-}
-
-fn compute_tx_change_hash(state: &revm::primitives::HashMap<Address, revm::state::Account>) -> [u8; 32] {
-    let mut accounts: Vec<([u8; 20], &revm::state::Account)> = Vec::new();
-    for (address, account) in state.iter() {
-        accounts.push((address_to_bytes(*address), account));
-    }
-    accounts.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"ic-evm:tx-change:v1");
-
-    for (address_bytes, account) in accounts.into_iter() {
-        buf.extend_from_slice(&address_bytes);
-        let mut flags = 0u8;
-        if account.is_selfdestructed() {
-            flags |= 0x01;
-        }
-        if account.is_empty() && account.is_touched() {
-            flags |= 0x02;
-        }
-        if account.info.code.is_some() {
-            flags |= 0x04;
-        }
-        buf.push(flags);
-        buf.extend_from_slice(&account.info.nonce.to_be_bytes());
-        buf.extend_from_slice(&u256_to_bytes(account.info.balance));
-        buf.extend_from_slice(&b256_to_bytes(account.info.code_hash));
-        if let Some(code) = account.info.code.as_ref() {
-            let bytes = code.original_byte_slice();
-            let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
-            buf.extend_from_slice(&len.to_be_bytes());
-            buf.extend_from_slice(bytes);
-        } else {
-            buf.extend_from_slice(&0u32.to_be_bytes());
-        }
-
-        let mut slots: Vec<([u8; 32], [u8; 32])> = Vec::new();
-        for (slot, entry) in account.changed_storage_slots() {
-            let slot_bytes = u256_to_bytes(*slot);
-            let value_bytes = u256_to_bytes(entry.present_value);
-            slots.push((slot_bytes, value_bytes));
-        }
-        slots.sort_by(|left, right| left.0.cmp(&right.0));
-        let count = u32::try_from(slots.len()).unwrap_or(u32::MAX);
-        buf.extend_from_slice(&count.to_be_bytes());
-        for (slot_bytes, value_bytes) in slots.into_iter() {
-            buf.extend_from_slice(&slot_bytes);
-            buf.extend_from_slice(&value_bytes);
-        }
-    }
-    keccak256(&buf)
+fn revm_log_to_receipt_log(log: revm::primitives::Log) -> LogEntry {
+    let address = alloy_primitives::Address::from(address_to_bytes(log.address));
+    let topics = log
+        .topics()
+        .iter()
+        .map(|topic| alloy_primitives::B256::from(topic.0))
+        .collect::<Vec<_>>();
+    let data = alloy_primitives::Bytes::from(log.data.data.to_vec());
+    LogEntry::new_unchecked(address, topics, data)
 }
 
 pub(crate) fn compute_effective_gas_price(
@@ -214,7 +584,17 @@ pub(crate) fn compute_effective_gas_price(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_effective_gas_price;
+    use super::{
+        build_l1blockinfo_calldata, build_op_transaction, compute_effective_gas_price,
+        compute_fee_breakdown, execute_tx, op_spec_id_from_u8, BlockExecContext, ExecError,
+        ExecPath, FeeBreakdown,
+    };
+    use super::{map_halt_reason, OpHaltReason};
+    use evm_db::chain_data::{L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, TxId, TxKind};
+    use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+    use op_revm::{OpHaltReason as RevmOpHaltReason, OpSpecId};
+    use revm::context::TxEnv;
+    use revm::context_interface::result::{HaltReason, OutOfGasError};
 
     #[test]
     fn effective_price_uses_min_of_max_and_base_plus_priority() {
@@ -236,5 +616,198 @@ mod tests {
     fn effective_price_handles_overflow_without_panic() {
         let effective = compute_effective_gas_price(u128::MAX, u128::MAX, u64::MAX);
         assert_eq!(effective, None);
+    }
+
+    #[test]
+    fn total_fee_uses_fixed_formula() {
+        let fee = FeeBreakdown {
+            l1_data_fee: 3,
+            operator_fee: 4,
+            fallback_used: false,
+        };
+        assert_eq!(fee.total_fee(2, 5), 17);
+    }
+
+    #[test]
+    fn l1_fee_fallback_is_used_when_snapshot_disabled() {
+        let ctx = BlockExecContext {
+            block_number: 1,
+            timestamp: 1,
+            base_fee: 1,
+            l1_params: L1BlockInfoParamsV1::new(),
+            l1_snapshot: L1BlockInfoSnapshotV1::new(),
+        };
+        let out = compute_fee_breakdown(&[0x02, 0x01], 21_000, OpSpecId::REGOLITH, &ctx);
+        assert!(out.fallback_used);
+        assert_eq!(out.l1_data_fee, 0);
+        assert_eq!(out.operator_fee, 0);
+    }
+
+    #[test]
+    fn invalid_spec_id_is_rejected() {
+        assert_eq!(op_spec_id_from_u8(99), Err(99));
+        assert_eq!(op_spec_id_from_u8(111), Err(111));
+    }
+
+    #[test]
+    fn all_supported_spec_ids_are_mapped() {
+        for value in 100u8..=110u8 {
+            assert!(op_spec_id_from_u8(value).is_ok(), "spec_id={value}");
+        }
+    }
+
+    #[test]
+    fn l1_block_info_call_data_switches_at_ecotone_boundary() {
+        let ctx = BlockExecContext {
+            block_number: 11,
+            timestamp: 22,
+            base_fee: 33,
+            l1_params: L1BlockInfoParamsV1 {
+                schema_version: 1,
+                spec_id: 102,
+                empty_ecotone_scalars: false,
+                l1_fee_overhead: 44,
+                l1_base_fee_scalar: 55,
+                l1_blob_base_fee_scalar: 66,
+                operator_fee_scalar: 0,
+                operator_fee_constant: 0,
+            },
+            l1_snapshot: L1BlockInfoSnapshotV1 {
+                schema_version: 1,
+                enabled: true,
+                l1_block_number: 66,
+                l1_base_fee: 77,
+                l1_blob_base_fee: 88,
+            },
+        };
+        let pre = build_l1blockinfo_calldata(OpSpecId::CANYON, &ctx).expect("pre-ecotone");
+        let post = build_l1blockinfo_calldata(OpSpecId::ECOTONE, &ctx).expect("post-ecotone");
+        assert_eq!(pre.len(), 4 + 8 * 32);
+        assert_eq!(post.len(), 4 + 9 * 32);
+    }
+
+    #[test]
+    fn deposit_path_returns_fixed_error_tag() {
+        let tx_env = TxEnv::builder()
+            .tx_type(Some(DEPOSIT_TRANSACTION_TYPE))
+            .gas_limit(21_000)
+            .build()
+            .expect("tx env");
+        let err = build_op_transaction(
+            TxKind::OpDeposit,
+            &[DEPOSIT_TRANSACTION_TYPE],
+            tx_env,
+            ExecPath::UserTx,
+        )
+        .expect_err("deposit should fail");
+        assert_eq!(err, ExecError::FailedDeposit);
+    }
+
+    #[test]
+    fn system_exec_path_is_rejected_before_accounting() {
+        let ctx = BlockExecContext {
+            block_number: 1,
+            timestamp: 1,
+            base_fee: 1,
+            l1_params: L1BlockInfoParamsV1::new(),
+            l1_snapshot: L1BlockInfoSnapshotV1::new(),
+        };
+        let tx_env = TxEnv::builder().gas_limit(21_000).build().expect("tx env");
+        let out = execute_tx(
+            TxId([0u8; 32]),
+            0,
+            TxKind::EthSigned,
+            &[0x02],
+            tx_env,
+            &ctx,
+            ExecPath::SystemTx,
+        );
+        assert!(matches!(out, Err(ExecError::SystemTxRejected)));
+    }
+
+    #[test]
+    fn l1_block_info_call_data_has_expected_shape() {
+        let ctx = BlockExecContext {
+            block_number: 11,
+            timestamp: 22,
+            base_fee: 33,
+            l1_params: L1BlockInfoParamsV1 {
+                schema_version: 1,
+                spec_id: 101,
+                empty_ecotone_scalars: false,
+                l1_fee_overhead: 44,
+                l1_base_fee_scalar: 55,
+                l1_blob_base_fee_scalar: 0,
+                operator_fee_scalar: 0,
+                operator_fee_constant: 0,
+            },
+            l1_snapshot: L1BlockInfoSnapshotV1 {
+                schema_version: 1,
+                enabled: true,
+                l1_block_number: 66,
+                l1_base_fee: 77,
+                l1_blob_base_fee: 0,
+            },
+        };
+        let data = build_l1blockinfo_calldata(OpSpecId::REGOLITH, &ctx).expect("calldata");
+        assert_eq!(data.len(), 4 + 8 * 32);
+        let selector = &crate::hash::keccak256(
+            b"setL1BlockValues(uint64,uint64,uint256,bytes32,uint64,bytes32,uint256,uint256)",
+        )[..4];
+        assert_eq!(&data[..4], selector);
+    }
+
+    #[test]
+    fn l1_block_info_call_data_v2_has_expected_shape() {
+        let ctx = BlockExecContext {
+            block_number: 11,
+            timestamp: 22,
+            base_fee: 33,
+            l1_params: L1BlockInfoParamsV1 {
+                schema_version: 1,
+                spec_id: 103,
+                empty_ecotone_scalars: false,
+                l1_fee_overhead: 44,
+                l1_base_fee_scalar: 55,
+                l1_blob_base_fee_scalar: 66,
+                operator_fee_scalar: 0,
+                operator_fee_constant: 0,
+            },
+            l1_snapshot: L1BlockInfoSnapshotV1 {
+                schema_version: 1,
+                enabled: true,
+                l1_block_number: 66,
+                l1_base_fee: 77,
+                l1_blob_base_fee: 88,
+            },
+        };
+        let data = build_l1blockinfo_calldata(OpSpecId::ECOTONE, &ctx).expect("calldata");
+        assert_eq!(data.len(), 4 + 9 * 32);
+        let selector = &crate::hash::keccak256(
+            b"setL1BlockValuesEcotone(uint32,uint32,uint64,uint64,uint64,uint256,uint256,bytes32,bytes32)",
+        )[..4];
+        assert_eq!(&data[..4], selector);
+    }
+
+    #[test]
+    fn halt_reason_mapping_covers_known_variants() {
+        assert_eq!(
+            map_halt_reason(RevmOpHaltReason::Base(HaltReason::OutOfGas(
+                OutOfGasError::Basic
+            ))),
+            OpHaltReason::OutOfGas
+        );
+        assert_eq!(
+            map_halt_reason(RevmOpHaltReason::Base(HaltReason::InvalidJump)),
+            OpHaltReason::InvalidJump
+        );
+    }
+
+    #[test]
+    fn failed_deposit_halt_maps_to_unknown_bucket() {
+        assert_eq!(
+            map_halt_reason(RevmOpHaltReason::FailedDeposit),
+            OpHaltReason::Unknown
+        );
     }
 }

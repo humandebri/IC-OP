@@ -18,12 +18,15 @@ required-features = ["local-signer-bin"]
 
 [dependencies]
 tiny-keccak = { version = "2", features = ["keccak"] }
+ic-cdk = "0.19.0"
 ic-stable-structures = "0.7.2"
 revm = { path = "../../vendor/revm/crates/revm", default-features = false, features = ["std"] }
 alloy-rlp = "0.3"
 alloy-primitives = { version = "1.5.2", default-features = false, features = ["std", "rlp"] }
 alloy-eips = { version = "1.5.2", default-features = false, features = ["std", "k256"] }
 alloy-consensus = { version = "1.5.2", default-features = false, features = ["std", "k256"] }
+alloy-trie = { version = "0.9.3", default-features = false, features = ["std", "ethereum"] }
+op-revm = { path = "../../vendor/revm/crates/op-revm", default-features = false, features = ["std"] }
 alloy-signer = { version = "1.5.2", default-features = false, optional = true }
 alloy-signer-local = { version = "1.5.2", default-features = false, optional = true }
 
@@ -34,3 +37,7 @@ path = "../evm-db"
 [features]
 full_state_root = []
 local-signer-bin = ["dep:alloy-signer", "dep:alloy-signer-local"]
+
+[dev-dependencies]
+alloy-signer = { version = "1.5.2", default-features = false }
+alloy-signer-local = { version = "1.5.2", default-features = false }

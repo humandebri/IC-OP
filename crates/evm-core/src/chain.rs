@@ -3,8 +3,9 @@
 use crate::base_fee::compute_next_base_fee;
 use crate::hash;
 use crate::revm_exec::{
-    compute_effective_gas_price, execute_l1_block_info_system_tx, execute_tx, BlockExecContext,
-    ExecError, ExecOutcome, ExecPath, OpHaltReason,
+    commit_state_diff_to_db, compute_effective_gas_price, execute_l1_block_info_system_tx,
+    execute_l1_block_info_system_tx_on, execute_tx, execute_tx_on, BlockExecContext, ExecError,
+    ExecOutcome, ExecPath, OpHaltReason, StateDiff,
 };
 use crate::state_root::compute_state_root_with;
 use crate::tx_decode::decode_tx;
@@ -24,6 +25,7 @@ use evm_db::types::keys::make_account_key;
 use evm_db::types::values::AccountVal;
 use ic_stable_structures::StableBTreeMap;
 use ic_stable_structures::Storable;
+use revm::database::CacheDB;
 use revm::primitives::Address;
 use revm::primitives::U256;
 use std::borrow::Cow;
@@ -940,27 +942,31 @@ fn execute_and_seal_with_caller(
         l1_params: *state.l1_block_info_params.get(),
         l1_snapshot: *state.l1_block_info_snapshot.get(),
     });
-    let now = now_sec();
-    if exec_ctx.l1_snapshot.enabled && record_system_tx_backoff_hit_if_active(now) {
-        return Err(ChainError::ExecFailed(Some(ExecError::SystemTxBackoff)));
-    }
-    if exec_ctx.l1_snapshot.enabled {
-        execute_l1_block_info_system_tx(&exec_ctx).map_err(|err| {
-            record_system_tx_failure(now);
-            observe_exec_error(&err, timestamp);
-            ChainError::ExecFailed(Some(err))
-        })?;
-        clear_system_tx_failure_streak();
-    } else {
-        record_l1_snapshot_disabled_skip(timestamp);
-    }
-
     let tx_env = decode_tx(kind, Address::from(caller), &stored.raw)
         .map_err(|_| ChainError::DecodeFailed)?;
     let sender_bytes = address_to_bytes(tx_env.caller);
     let sender_nonce = tx_env.nonce;
 
-    let outcome = match execute_tx(
+    let now = now_sec();
+    if exec_ctx.l1_snapshot.enabled && record_system_tx_backoff_hit_if_active(now) {
+        return Err(ChainError::ExecFailed(Some(ExecError::SystemTxBackoff)));
+    }
+    let mut sync_db = CacheDB::new(crate::revm_db::RevmStableDb);
+    let mut staged_state_diffs: Vec<StateDiff> = Vec::new();
+    if exec_ctx.l1_snapshot.enabled {
+        let (state_diff, next_db) = execute_l1_block_info_system_tx_on(sync_db, &exec_ctx)
+            .map_err(|err| {
+                record_system_tx_failure(now);
+                observe_exec_error(&err, timestamp);
+                ChainError::ExecFailed(Some(err))
+            })?;
+        sync_db = next_db;
+        staged_state_diffs.push(state_diff);
+    } else {
+        record_l1_snapshot_disabled_skip(timestamp);
+    }
+    let (outcome, user_state_diff, _db_after_user) = match execute_tx_on(
+        sync_db,
         tx_id,
         0,
         kind,
@@ -968,6 +974,7 @@ fn execute_and_seal_with_caller(
         tx_env,
         &exec_ctx,
         ExecPath::UserTx,
+        false,
     ) {
         Ok(value) => value,
         Err(err) => {
@@ -975,9 +982,16 @@ fn execute_and_seal_with_caller(
             return Err(ChainError::ExecFailed(Some(err)));
         }
     };
+    staged_state_diffs.push(user_state_diff);
     observe_exec_outcome(timestamp, &outcome);
     if outcome.l1_fee_fallback_used {
         record_l1_fee_fallback();
+    }
+    for state_diff in staged_state_diffs {
+        commit_state_diff_to_db(state_diff);
+    }
+    if exec_ctx.l1_snapshot.enabled {
+        clear_system_tx_failure_streak();
     }
 
     let tx_list_hash = hash::tx_list_hash(&[tx_id.0]);
@@ -1002,6 +1016,16 @@ fn execute_and_seal_with_caller(
             block_hash,
             timestamp,
         });
+        let tx_index_ptr = store_tx_index_entry(
+            state,
+            TxIndexEntry {
+                block_number: number,
+                tx_index: outcome.tx_index,
+            },
+        );
+        state.tx_index.insert(tx_id, tx_index_ptr);
+        let receipt_ptr = store_receipt(state, &outcome.receipt);
+        state.receipts.insert(tx_id, receipt_ptr);
         state
             .tx_locs
             .insert(tx_id, TxLoc::included(number, outcome.tx_index));

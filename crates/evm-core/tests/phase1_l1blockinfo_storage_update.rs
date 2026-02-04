@@ -2,6 +2,7 @@
 
 use evm_core::chain;
 use evm_core::hash;
+use evm_core::revm_exec::{ExecError, OpTransactionError};
 use evm_db::chain_data::{L1BlockInfoParamsV1, L1BlockInfoSnapshotV1};
 use evm_db::stable_state::{init_stable_state, with_state, with_state_mut};
 use evm_db::types::keys::{make_account_key, make_code_key, make_storage_key};
@@ -50,6 +51,54 @@ fn disabled_snapshot_skips_l1_storage_update() {
     assert_user_accounting_is_not_polluted();
 }
 
+#[test]
+fn sync_precheck_failure_does_not_commit_l1_system_tx() {
+    init_stable_state();
+    install_l1block_mock_runtime(0x04);
+    configure_l1(101, true, 321, 777, 0);
+
+    let caller_principal = vec![0x64];
+
+    let err = chain::execute_ic_tx(
+        caller_principal,
+        vec![0xaa],
+        build_ic_tx_bytes([0x64u8; 20]),
+    )
+    .expect_err("insufficient balance should fail sync path");
+    assert!(matches!(
+        err,
+        chain::ChainError::ExecFailed(Some(ExecError::TxError(
+            OpTransactionError::TxPrecheckFailed
+        )))
+    ));
+
+    assert_eq!(read_storage_word(0), U256::ZERO);
+    assert_eq!(read_storage_word(1), U256::ZERO);
+    assert_eq!(read_storage_word(2), U256::ZERO);
+    assert_no_receipt_index_entries();
+}
+
+#[test]
+fn sync_user_revert_commits_l1_system_tx_and_seals() {
+    init_stable_state();
+    install_l1block_mock_runtime(0x04);
+    configure_l1(101, true, 654, 777, 0);
+
+    let caller_principal = vec![0x65];
+    let caller = hash::caller_evm_from_principal(&caller_principal);
+    chain::dev_mint(caller, 1_000_000_000_000_000_000).expect("mint");
+    let target = [0x65u8; 20];
+    install_user_revert_contract(target);
+
+    let result = chain::execute_ic_tx(caller_principal, vec![0xaa], build_ic_tx_bytes(target))
+        .expect("revert is still seal success");
+    assert_eq!(result.status, 0);
+
+    let slot0 = read_storage_word(0);
+    assert_eq!(slot0, U256::from(654u64));
+    assert_user_accounting_is_not_polluted();
+}
+
 fn configure_l1(
     spec_id: u8,
     enabled: bool,
@@ -88,18 +137,39 @@ fn run_single_user_tx(tag: u8) {
 }
 
 fn assert_user_accounting_is_not_polluted() {
-    let (receipt_count, tx_index_count) = with_state(|state| (state.receipts.len(), state.tx_index.len()));
+    let (receipt_count, tx_index_count) =
+        with_state(|state| (state.receipts.len(), state.tx_index.len()));
     assert_eq!(receipt_count, 1);
     assert_eq!(tx_index_count, 1);
+}
+
+fn assert_no_receipt_index_entries() {
+    let (receipt_count, tx_index_count) =
+        with_state(|state| (state.receipts.len(), state.tx_index.len()));
+    assert_eq!(receipt_count, 0);
+    assert_eq!(tx_index_count, 0);
 }
 
 fn install_user_stop_contract(address: [u8; 20]) {
     let code = vec![0x00u8];
     let code_hash = hash::keccak256(&code);
     with_state_mut(|state| {
-        state
-            .accounts
-            .insert(make_account_key(address), AccountVal::from_parts(0, [0u8; 32], code_hash));
+        state.accounts.insert(
+            make_account_key(address),
+            AccountVal::from_parts(0, [0u8; 32], code_hash),
+        );
+        state.codes.insert(make_code_key(code_hash), CodeVal(code));
+    });
+}
+
+fn install_user_revert_contract(address: [u8; 20]) {
+    let code = vec![0x60, 0x00, 0x60, 0x00, 0xfd];
+    let code_hash = hash::keccak256(&code);
+    with_state_mut(|state| {
+        state.accounts.insert(
+            make_account_key(address),
+            AccountVal::from_parts(0, [0u8; 32], code_hash),
+        );
         state.codes.insert(make_code_key(code_hash), CodeVal(code));
     });
 }
@@ -113,9 +183,10 @@ fn install_l1block_mock_runtime(block_number_offset: u8) {
     let mut addr = [0u8; 20];
     addr.copy_from_slice(L1_BLOCK_CONTRACT.as_ref());
     with_state_mut(|state| {
-        state
-            .accounts
-            .insert(make_account_key(addr), AccountVal::from_parts(0, [0u8; 32], code_hash));
+        state.accounts.insert(
+            make_account_key(addr),
+            AccountVal::from_parts(0, [0u8; 32], code_hash),
+        );
         state.codes.insert(make_code_key(code_hash), CodeVal(code));
     });
 }

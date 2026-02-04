@@ -18,8 +18,11 @@ use op_revm::{
 };
 use revm::context::{BlockEnv, TxEnv};
 use revm::context_interface::result::{EVMError, ExecutionResult, HaltReason};
+use revm::database_interface::DatabaseCommit;
 use revm::handler::{ExecuteCommitEvm, ExecuteEvm, SystemCallEvm};
 use revm::primitives::{Address, Bytes, B256, U256};
+
+pub(crate) type StateDiff = revm::primitives::HashMap<Address, revm::state::Account>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecError {
@@ -105,6 +108,34 @@ pub fn execute_tx(
     exec_ctx: &BlockExecContext,
     exec_path: ExecPath,
 ) -> Result<ExecOutcome, ExecError> {
+    let (outcome, _state_diff, _db) = execute_tx_on(
+        RevmStableDb,
+        tx_id,
+        tx_index,
+        tx_kind,
+        raw_tx,
+        tx_env,
+        exec_ctx,
+        exec_path,
+        true,
+    )?;
+    Ok(outcome)
+}
+
+pub(crate) fn execute_tx_on<DB>(
+    db: DB,
+    tx_id: TxId,
+    tx_index: u32,
+    tx_kind: TxKind,
+    raw_tx: &[u8],
+    tx_env: revm::context::TxEnv,
+    exec_ctx: &BlockExecContext,
+    exec_path: ExecPath,
+    persist_receipt_index: bool,
+) -> Result<(ExecOutcome, StateDiff, DB), ExecError>
+where
+    DB: revm::database_interface::Database<Error = core::convert::Infallible> + DatabaseCommit,
+{
     if exec_path == ExecPath::SystemTx {
         return Err(ExecError::SystemTxRejected);
     }
@@ -116,11 +147,11 @@ pub fn execute_tx(
         exec_ctx.base_fee,
     )
     .ok_or(ExecError::InvalidGasFee)?;
-    let mut evm = build_op_context(exec_ctx, spec).build_op();
+    let mut evm = build_op_context(exec_ctx, spec, db).build_op();
     let op_tx = build_op_transaction(tx_kind, raw_tx, tx_env, exec_path)?;
     let result = evm.transact(op_tx).map_err(map_tx_error_stage)?;
     let state_diff = collect_state_diff(result.state);
-    commit_state_diff(&mut evm, state_diff);
+    commit_state_diff(&mut evm, state_diff.clone());
 
     let (status, gas_used, output, contract_address, logs, final_status, halt_reason) =
         match result.result {
@@ -186,10 +217,12 @@ pub fn execute_tx(
         logs,
     };
 
-    // User tx only: system tx accounting must not create receipt/index entries.
-    store_receipt_index(tx_id, exec_ctx.block_number, tx_index, &receipt);
+    if persist_receipt_index {
+        // User tx only: system tx accounting must not create receipt/index entries.
+        store_receipt_index(tx_id, exec_ctx.block_number, tx_index, &receipt);
+    }
 
-    Ok(ExecOutcome {
+    let outcome = ExecOutcome {
         tx_id,
         tx_index,
         receipt,
@@ -197,13 +230,27 @@ pub fn execute_tx(
         final_status,
         halt_reason,
         l1_fee_fallback_used: fee_breakdown.fallback_used,
-    })
+    };
+    let ctx = evm.into_context();
+    let db = ctx.journaled_state.database;
+    Ok((outcome, state_diff, db))
 }
 
 pub fn execute_l1_block_info_system_tx(exec_ctx: &BlockExecContext) -> Result<(), ExecError> {
+    let (_state_diff, _db) = execute_l1_block_info_system_tx_on(RevmStableDb, exec_ctx)?;
+    Ok(())
+}
+
+pub(crate) fn execute_l1_block_info_system_tx_on<DB>(
+    db: DB,
+    exec_ctx: &BlockExecContext,
+) -> Result<(StateDiff, DB), ExecError>
+where
+    DB: revm::database_interface::Database<Error = core::convert::Infallible> + DatabaseCommit,
+{
     let spec =
         op_spec_id_from_u8(exec_ctx.l1_params.spec_id).map_err(ExecError::InvalidL1SpecId)?;
-    let mut evm = build_op_context(exec_ctx, spec).build_op();
+    let mut evm = build_op_context(exec_ctx, spec, db).build_op();
     let call_data = build_l1blockinfo_calldata(spec, exec_ctx)?;
     let result = evm
         .system_call(L1_BLOCK_CONTRACT, call_data)
@@ -220,8 +267,15 @@ pub fn execute_l1_block_info_system_tx(exec_ctx: &BlockExecContext) -> Result<()
         }
     }
     let state_diff = collect_state_diff(result.state);
-    commit_state_diff(&mut evm, state_diff);
-    Ok(())
+    commit_state_diff(&mut evm, state_diff.clone());
+    let ctx = evm.into_context();
+    let db = ctx.journaled_state.database;
+    Ok((state_diff, db))
+}
+
+pub(crate) fn commit_state_diff_to_db(state: StateDiff) {
+    let mut db = RevmStableDb;
+    db.commit(state);
 }
 
 fn build_l1blockinfo_calldata(
@@ -300,8 +354,11 @@ fn push_b256_word(out: &mut Vec<u8>, value: B256) {
     out.extend_from_slice(value.as_ref());
 }
 
-fn build_op_context(exec_ctx: &BlockExecContext, spec: OpSpecId) -> OpContext<RevmStableDb> {
-    let mut ctx: OpContext<RevmStableDb> = OpContext::op().with_db(RevmStableDb);
+fn build_op_context<DB>(exec_ctx: &BlockExecContext, spec: OpSpecId, db: DB) -> OpContext<DB>
+where
+    DB: revm::database_interface::Database,
+{
+    let mut ctx: OpContext<DB> = OpContext::op().with_db(db);
     ctx.block = BlockEnv {
         number: U256::from(exec_ctx.block_number),
         timestamp: U256::from(exec_ctx.timestamp),
@@ -315,16 +372,11 @@ fn build_op_context(exec_ctx: &BlockExecContext, spec: OpSpecId) -> OpContext<Re
     ctx
 }
 
-fn collect_state_diff(
-    state: revm::primitives::HashMap<Address, revm::state::Account>,
-) -> revm::primitives::HashMap<Address, revm::state::Account> {
+fn collect_state_diff(state: StateDiff) -> StateDiff {
     state
 }
 
-fn commit_state_diff(
-    evm: &mut impl ExecuteCommitEvm<State = revm::primitives::HashMap<Address, revm::state::Account>>,
-    state: revm::primitives::HashMap<Address, revm::state::Account>,
-) {
+fn commit_state_diff(evm: &mut impl ExecuteCommitEvm<State = StateDiff>, state: StateDiff) {
     evm.commit(state);
 }
 

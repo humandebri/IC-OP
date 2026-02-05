@@ -1,16 +1,12 @@
 //! どこで: Phase1のハッシュ規則 / 何を: tx_id/tx_list_hash/block_hash / なぜ: 決定性を保証するため
 
+use alloy_primitives::keccak256 as alloy_keccak256;
 use evm_db::chain_data::TxKind;
-use tiny_keccak::{Hasher, Keccak};
 
 pub const HASH_LEN: usize = 32;
 
 pub fn keccak256(data: &[u8]) -> [u8; HASH_LEN] {
-    let mut out = [0u8; HASH_LEN];
-    let mut hasher = Keccak::v256();
-    hasher.update(data);
-    hasher.finalize(&mut out);
-    out
+    alloy_keccak256(data).0
 }
 
 pub fn stored_tx_id(
@@ -41,11 +37,10 @@ pub fn stored_tx_id(
 }
 
 pub fn caller_evm_from_principal(principal_bytes: &[u8]) -> [u8; 20] {
-    let mut hash = [0u8; HASH_LEN];
-    let mut hasher = Keccak::v256();
-    hasher.update(b"ic-evm:caller_evm:v1");
-    hasher.update(principal_bytes);
-    hasher.finalize(&mut hash);
+    let mut payload = Vec::with_capacity("ic-evm:caller_evm:v1".len() + principal_bytes.len());
+    payload.extend_from_slice(b"ic-evm:caller_evm:v1");
+    payload.extend_from_slice(principal_bytes);
+    let hash = keccak256(&payload);
     let mut out = [0u8; 20];
     out.copy_from_slice(&hash[12..32]);
     out

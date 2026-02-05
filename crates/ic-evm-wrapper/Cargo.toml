@@ -16,6 +16,8 @@ ic-cdk = "0.19.0"
 ic-cdk-timers = "1.0.0"
 serde = { version = "1", features = ["derive"] }
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "json", "env-filter"] }
 
 [dependencies.evm-core]
 package = "ic-evm-core"

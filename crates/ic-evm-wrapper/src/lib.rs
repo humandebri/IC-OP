@@ -14,10 +14,13 @@ use evm_db::meta::{
 use evm_db::stable_state::{init_stable_state, with_state};
 use evm_db::upgrade;
 use ic_cdk::api::{
-    accept_message, canister_cycle_balance, debug_print, is_controller, msg_caller,
-    msg_method_name, time,
+    accept_message, canister_cycle_balance, is_controller, msg_caller, msg_method_name, time,
 };
 use serde::Deserialize;
+use std::io::{self, Write};
+use std::sync::OnceLock;
+use tracing::{error, info, warn};
+use tracing_subscriber::fmt::MakeWriter;
 
 #[cfg(target_arch = "wasm32")]
 getrandom::register_custom_getrandom!(always_fail_getrandom);
@@ -358,6 +361,7 @@ impl InitArgs {
 
 #[ic_cdk::init]
 fn init(args: Option<InitArgs>) {
+    init_tracing();
     let _ = ensure_meta_initialized();
     init_stable_state();
     let args = args.unwrap_or_else(|| {
@@ -379,6 +383,7 @@ fn init(args: Option<InitArgs>) {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    init_tracing();
     upgrade::post_upgrade();
     let _ = ensure_meta_initialized();
     init_stable_state();
@@ -471,7 +476,7 @@ fn map_execute_chain_result(
             return Err(ExecuteTxError::Rejected(code.to_string()));
         }
         Err(err) => {
-            debug_print(format!("execute_tx err: {:?}", err));
+            error!(error = ?err, "execute_tx failed");
             return Err(ExecuteTxError::Internal("internal error".to_string()));
         }
     };
@@ -528,7 +533,7 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
             return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
-            debug_print(format!("submit_eth_tx err: {:?}", err));
+            error!(error = ?err, "submit_eth_tx failed");
             return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
@@ -585,7 +590,7 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
             return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
-            debug_print(format!("submit_ic_tx err: {:?}", err));
+            error!(error = ?err, "submit_ic_tx failed");
             return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
@@ -671,7 +676,7 @@ fn produce_block(max_txs: u32) -> Result<ProduceBlockStatus, ProduceBlockError> 
             "max_txs must be > 0".to_string(),
         )),
         Err(err) => {
-            debug_print(format!("produce_block err: {:?}", err));
+            error!(error = ?err, "produce_block failed");
             Err(ProduceBlockError::Internal("internal error".to_string()))
         }
     }
@@ -908,7 +913,7 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
             return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
-            debug_print(format!("rpc_eth_send_raw_transaction err: {:?}", err));
+            error!(error = ?err, "rpc_eth_send_raw_transaction failed");
             return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
@@ -1418,7 +1423,8 @@ fn migration_pending() -> bool {
     if meta.needs_migration || meta.schema_version < current_schema_version() {
         return true;
     }
-    let pending = with_state(|state| state.state_root_migration.get().phase != MigrationPhase::Done);
+    let pending =
+        with_state(|state| state.state_root_migration.get().phase != MigrationPhase::Done);
     if !pending {
         return false;
     }
@@ -1484,14 +1490,56 @@ fn reject_anonymous_principal(caller: Principal) -> Option<String> {
     None
 }
 
+fn init_tracing() {
+    static LOG_INIT: OnceLock<()> = OnceLock::new();
+    let _ = LOG_INIT.get_or_init(|| {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_target(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .with_writer(IcDebugPrintMakeWriter)
+            .with_env_filter("info")
+            .try_init();
+    });
+}
+
+#[derive(Clone, Copy)]
+struct IcDebugPrintMakeWriter;
+
+impl<'a> MakeWriter<'a> for IcDebugPrintMakeWriter {
+    type Writer = IcDebugPrintWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        IcDebugPrintWriter
+    }
+}
+
+struct IcDebugPrintWriter;
+
+impl Write for IcDebugPrintWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let message = String::from_utf8_lossy(buf).trim().to_string();
+        if !message.is_empty() {
+            ic_cdk::api::debug_print(message);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn apply_post_upgrade_migrations() {
     let meta = get_meta();
     let current = current_schema_version();
     if meta.schema_version > current {
-        debug_print(format!(
-            "upgrade: schema {} is newer than supported {}",
-            meta.schema_version, current
-        ));
+        warn!(
+            schema_version = meta.schema_version,
+            supported_schema = current,
+            "upgrade schema is newer than supported"
+        );
         let mut next = meta;
         next.needs_migration = true;
         evm_db::meta::set_meta(next);
@@ -1502,7 +1550,7 @@ fn apply_post_upgrade_migrations() {
     let mut to = from;
     if from < 2 {
         chain::clear_mempool_on_upgrade();
-        debug_print("mempool cleared on upgrade migration".to_string());
+        info!("mempool cleared on upgrade migration");
         to = 2;
     }
     if to != from || meta.needs_migration {

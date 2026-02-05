@@ -5,10 +5,10 @@ use crate::chain_data::constants::{
 };
 use crate::corrupt_log::record_corrupt;
 use crate::decode::hash_to_array;
+use alloy_primitives::keccak256 as alloy_keccak256;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
-use tiny_keccak::{Hasher, Keccak};
 
 const MAX_STORED_PRINCIPAL_LEN: usize = 64;
 const STORED_TX_VERSION: u8 = 3;
@@ -469,19 +469,14 @@ fn stored_tx_id(
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(bytes);
     }
-    let mut out = [0u8; TX_ID_LEN];
-    let mut hasher = Keccak::v256();
-    hasher.update(&buf);
-    hasher.finalize(&mut out);
-    out
+    alloy_keccak256(&buf).0
 }
 
 fn caller_evm_from_principal(principal_bytes: &[u8]) -> [u8; 20] {
-    let mut hash = [0u8; TX_ID_LEN];
-    let mut hasher = Keccak::v256();
-    hasher.update(b"ic-evm:caller_evm:v1");
-    hasher.update(principal_bytes);
-    hasher.finalize(&mut hash);
+    let mut payload = Vec::with_capacity("ic-evm:caller_evm:v1".len() + principal_bytes.len());
+    payload.extend_from_slice(b"ic-evm:caller_evm:v1");
+    payload.extend_from_slice(principal_bytes);
+    let hash = alloy_keccak256(&payload).0;
     let mut out = [0u8; 20];
     out.copy_from_slice(&hash[12..32]);
     out

@@ -81,3 +81,9 @@
 - [ ] SIMD ON/OFF の両ビルド導線を維持
 - [ ] correctness一致テストを先に実施
 - [ ] ベンチ結果と改善点を記録
+
+## 追加改善（2026-02-05）
+
+- [x] ハッシュ実装を `tiny-keccak` 直接呼び出しから `alloy-primitives::keccak256` へ統一
+- [x] `tx_loc` の `Storable` を bincode v2（fixed-int + big-endian）へ移行し、旧24byte形式の後方互換デコードを追加
+- [x] `debug_print` 中心のログを `tracing` イベントへ移行し、wrapper で JSON 出力サブスクライバを初期化

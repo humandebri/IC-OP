@@ -2,11 +2,12 @@
 
 use crate::chain_data::constants::TX_LOC_SIZE_U32;
 use crate::corrupt_log::record_corrupt;
+use bincode::{Decode, Encode};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, PartialEq)]
 #[repr(u8)]
 pub enum TxLocKind {
     Queued = 0,
@@ -14,7 +15,7 @@ pub enum TxLocKind {
     Dropped = 2,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, PartialEq)]
 pub struct TxLoc {
     pub kind: TxLocKind,
     pub seq: u64,
@@ -57,13 +58,9 @@ impl TxLoc {
 
 impl Storable for TxLoc {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 24];
-        out[0] = self.kind as u8;
-        out[1..9].copy_from_slice(&self.seq.to_be_bytes());
-        out[9..17].copy_from_slice(&self.block_number.to_be_bytes());
-        out[17..21].copy_from_slice(&self.tx_index.to_be_bytes());
-        out[21..23].copy_from_slice(&self.drop_code.to_be_bytes());
-        Cow::Owned(out.to_vec())
+        let encoded = bincode::encode_to_vec(*self, tx_loc_bincode_config())
+            .unwrap_or_else(|_| ic_cdk::trap("tx_loc: encode failed"));
+        Cow::Owned(encoded)
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -72,33 +69,9 @@ impl Storable for TxLoc {
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let data = bytes.as_ref();
-        if data.len() != 24 {
-            record_corrupt(b"tx_loc");
-            return TxLoc::queued(0);
-        }
-        let kind = match data[0] {
-            0 => TxLocKind::Queued,
-            1 => TxLocKind::Included,
-            2 => TxLocKind::Dropped,
-            _ => {
-                record_corrupt(b"tx_loc_kind");
-                TxLocKind::Queued
-            }
-        };
-        let mut seq = [0u8; 8];
-        seq.copy_from_slice(&data[1..9]);
-        let mut block = [0u8; 8];
-        block.copy_from_slice(&data[9..17]);
-        let mut idx = [0u8; 4];
-        idx.copy_from_slice(&data[17..21]);
-        let mut code = [0u8; 2];
-        code.copy_from_slice(&data[21..23]);
-        Self {
-            kind,
-            seq: u64::from_be_bytes(seq),
-            block_number: u64::from_be_bytes(block),
-            tx_index: u32::from_be_bytes(idx),
-            drop_code: u16::from_be_bytes(code),
+        match bincode::decode_from_slice::<TxLoc, _>(data, tx_loc_bincode_config()) {
+            Ok((value, read)) if read == data.len() => value,
+            _ => decode_legacy_tx_loc(data),
         }
     }
 
@@ -106,4 +79,41 @@ impl Storable for TxLoc {
         max_size: TX_LOC_SIZE_U32,
         is_fixed_size: true,
     };
+}
+
+fn tx_loc_bincode_config() -> impl bincode::config::Config {
+    bincode::config::standard()
+        .with_fixed_int_encoding()
+        .with_big_endian()
+}
+
+fn decode_legacy_tx_loc(data: &[u8]) -> TxLoc {
+    if data.len() != 24 {
+        record_corrupt(b"tx_loc");
+        return TxLoc::queued(0);
+    }
+    let kind = match data[0] {
+        0 => TxLocKind::Queued,
+        1 => TxLocKind::Included,
+        2 => TxLocKind::Dropped,
+        _ => {
+            record_corrupt(b"tx_loc_kind");
+            TxLocKind::Queued
+        }
+    };
+    let mut seq = [0u8; 8];
+    seq.copy_from_slice(&data[1..9]);
+    let mut block = [0u8; 8];
+    block.copy_from_slice(&data[9..17]);
+    let mut idx = [0u8; 4];
+    idx.copy_from_slice(&data[17..21]);
+    let mut code = [0u8; 2];
+    code.copy_from_slice(&data[21..23]);
+    TxLoc {
+        kind,
+        seq: u64::from_be_bytes(seq),
+        block_number: u64::from_be_bytes(block),
+        tx_index: u32::from_be_bytes(idx),
+        drop_code: u16::from_be_bytes(code),
+    }
 }

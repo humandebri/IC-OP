@@ -1,13 +1,13 @@
 //! どこで: chain_data のReceipt / 何を: 最小結果 + logs の保存 / なぜ: 互換性と観測のため
 
 use crate::chain_data::constants::{
-    HASH_LEN, MAX_LOG_DATA, MAX_LOGS_PER_TX, MAX_LOG_TOPICS, MAX_RETURN_DATA,
+    HASH_LEN, MAX_LOGS_PER_TX, MAX_LOG_DATA, MAX_LOG_TOPICS, MAX_RETURN_DATA,
     RECEIPT_CONTRACT_ADDR_LEN, RECEIPT_MAX_SIZE_U32,
 };
 use crate::chain_data::tx::TxId;
 use crate::corrupt_log::record_corrupt;
 use crate::decode::{read_array, read_u32, read_u64, read_u8, read_vec};
-use alloy_primitives::{Address, B256, Bytes, Log, LogData};
+use alloy_primitives::{Address, Bytes, Log, LogData, B256};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -68,8 +68,8 @@ impl Storable for ReceiptLike {
                 out.extend_from_slice(&[0u8; RECEIPT_CONTRACT_ADDR_LEN]);
             }
         }
-        let logs_len = u32::try_from(self.logs.len())
-            .unwrap_or_else(|_| ic_cdk::trap("receipt: logs len"));
+        let logs_len =
+            u32::try_from(self.logs.len()).unwrap_or_else(|_| ic_cdk::trap("receipt: logs len"));
         out.extend_from_slice(&logs_len.to_be_bytes());
         for log in self.logs.iter() {
             let topics = log.data.topics();
@@ -81,14 +81,14 @@ impl Storable for ReceiptLike {
                 ic_cdk::trap("receipt: log data too large");
             }
             out.extend_from_slice(log.address.as_ref());
-            let topics_len = u32::try_from(topics.len())
-                .unwrap_or_else(|_| ic_cdk::trap("receipt: topics len"));
+            let topics_len =
+                u32::try_from(topics.len()).unwrap_or_else(|_| ic_cdk::trap("receipt: topics len"));
             out.extend_from_slice(&topics_len.to_be_bytes());
             for topic in topics.iter() {
                 out.extend_from_slice(topic.as_ref());
             }
-            let data_len = u32::try_from(data.len())
-                .unwrap_or_else(|_| ic_cdk::trap("receipt: log data len"));
+            let data_len =
+                u32::try_from(data.len()).unwrap_or_else(|_| ic_cdk::trap("receipt: log data len"));
             out.extend_from_slice(&data_len.to_be_bytes());
             out.extend_from_slice(data);
         }

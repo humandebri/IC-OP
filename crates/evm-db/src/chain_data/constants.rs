@@ -49,6 +49,7 @@ pub const DROP_CODE_MISSING: u16 = 3;
 pub const DROP_CODE_CALLER_MISSING: u16 = 4;
 pub const DROP_CODE_INVALID_FEE: u16 = 5;
 pub const DROP_CODE_REPLACED: u16 = 6;
+pub const DROPPED_RING_CAPACITY: u64 = 1_000;
 
 // logs/receiptの上限
 pub const MAX_LOGS_PER_TX: usize = 64;
@@ -58,21 +59,21 @@ pub const MAX_LOG_DATA_U32: u32 = 4096;
 pub const RECEIPT_V2_EXTRA_U32: u32 = 8 + 16 + 16 + 16;
 
 // Receiptの最大サイズ（固定部 + 可変部の上限）
-pub const RECEIPT_MAX_SIZE_U32: u32 =
-    RECEIPT_V2_EXTRA_U32
-        + 32
-        + 8
-        + 4
-        + 1
-        + 8
-        + 8
-        + 4
-        + (MAX_RETURN_DATA as u32)
-        + 1
-        + RECEIPT_CONTRACT_ADDR_LEN_U32
-        + 4
-        + (MAX_LOGS_PER_TX as u32)
-            * (20 + 4 + (MAX_LOG_TOPICS as u32) * 32 + 4 + MAX_LOG_DATA_U32);
+pub const RECEIPT_MAX_SIZE_U32: u32 = RECEIPT_V2_EXTRA_U32
+    + 32
+    + 8
+    + 4
+    + 1
+    + 8
+    + 8
+    + 4
+    + (MAX_RETURN_DATA as u32)
+    + 1
+    + RECEIPT_CONTRACT_ADDR_LEN_U32
+    + 4
+    + (MAX_LOGS_PER_TX as u32) * (20 + 4 + (MAX_LOG_TOPICS as u32) * 32 + 4 + MAX_LOG_DATA_U32);
 
-pub const BLOCK_BASE_SIZE_U32: u32 = 8 + HASH_LEN_U32 + HASH_LEN_U32 + 8 + HASH_LEN_U32 + HASH_LEN_U32 + 4;
-pub const MAX_BLOCK_DATA_SIZE_U32: u32 = BLOCK_BASE_SIZE_U32 + (HASH_LEN_U32 * MAX_TXS_PER_BLOCK_U32);
+pub const BLOCK_BASE_SIZE_U32: u32 =
+    8 + HASH_LEN_U32 + HASH_LEN_U32 + 8 + HASH_LEN_U32 + HASH_LEN_U32 + 4;
+pub const MAX_BLOCK_DATA_SIZE_U32: u32 =
+    BLOCK_BASE_SIZE_U32 + (HASH_LEN_U32 * MAX_TXS_PER_BLOCK_U32);

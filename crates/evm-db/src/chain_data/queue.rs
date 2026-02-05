@@ -1,9 +1,9 @@
 //! どこで: Phase1のQueue / 何を: submit系の順序管理 / なぜ: 決定性を保つため
 
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
-use crate::corrupt_log::record_corrupt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueueMeta {

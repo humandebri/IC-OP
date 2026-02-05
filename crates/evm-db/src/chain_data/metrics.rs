@@ -1,9 +1,9 @@
 //! どこで: Phase1.6のメトリクス / 何を: 永続カウンタとウィンドウ集計 / なぜ: 低コスト監視のため
 
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
-use crate::corrupt_log::record_corrupt;
 
 pub const METRICS_BUCKETS: usize = 256;
 pub const METRICS_BUCKETS_U32: u32 = 256;
@@ -259,8 +259,7 @@ impl Storable for MetricsStateV1 {
 }
 
 const METRICS_BUCKET_SIZE: u32 = 8 * 4;
-const METRICS_STATE_BASE: u32 =
-    4 + 8 * 3 + 8 * (DROP_CODE_SLOTS as u32) + 8 * 3 + 4 + 4;
+const METRICS_STATE_BASE: u32 = 4 + 8 * 3 + 8 * (DROP_CODE_SLOTS as u32) + 8 * 3 + 4 + 4;
 const METRICS_STATE_SIZE_U32: u32 = METRICS_STATE_BASE + METRICS_BUCKET_SIZE * METRICS_BUCKETS_U32;
 const METRICS_STATE_SIZE: u32 = METRICS_STATE_SIZE_U32;
 

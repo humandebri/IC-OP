@@ -221,6 +221,7 @@ service : (opt InitArgs) -> {
   get_cycle_balance : () -> (nat) query;
   get_l1_block_info_params : () -> (L1BlockInfoParamsView) query;
   get_l1_block_info_snapshot : () -> (L1BlockInfoSnapshotView) query;
+  get_miner_allowlist : () -> (vec principal) query;
   get_ops_status : () -> (OpsStatusView) query;
   get_pending : (blob) -> (PendingStatusView) query;
   get_prune_status : () -> (PruneStatusView) query;
@@ -239,6 +240,7 @@ service : (opt InitArgs) -> {
   set_auto_mine : (bool) -> (Result_7);
   set_l1_block_info_params : (L1BlockInfoParamsView) -> (Result_7);
   set_l1_block_info_snapshot : (L1BlockInfoSnapshotView) -> (Result_7);
+  set_miner_allowlist : (vec principal) -> (Result_7);
   set_mining_interval_ms : (nat64) -> (Result_7);
   set_ops_config : (OpsConfigView) -> (Result_7);
   set_prune_policy : (PrunePolicyView) -> (Result_7);

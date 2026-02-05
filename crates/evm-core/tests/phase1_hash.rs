@@ -1,7 +1,10 @@
 //! どこで: Phase1テスト / 何を: ハッシュ決定性 / なぜ: 再現性を保証するため
 
 use evm_core::hash::{block_hash, keccak256, stored_tx_id, tx_list_hash};
-use evm_core::state_root::compute_state_root_with;
+use evm_core::state_root::{
+    commit_state_root_with, compute_state_root_incremental_with, compute_state_root_with,
+    TouchedSummary,
+};
 use evm_db::chain_data::TxKind;
 use evm_db::stable_state::{init_stable_state, with_state, with_state_mut};
 use evm_db::types::keys::{make_account_key, make_storage_key};
@@ -120,6 +123,147 @@ fn state_root_changes_when_storage_changes() {
 }
 
 #[test]
+fn incremental_state_root_matches_full_scan() {
+    init_stable_state();
+    let addr_a = [0x55u8; 20];
+    let addr_b = [0x66u8; 20];
+    with_state_mut(|state| {
+        state.accounts.insert(
+            make_account_key(addr_a),
+            AccountVal::from_parts(1, [0x01u8; 32], [0u8; 32]),
+        );
+        state.accounts.insert(
+            make_account_key(addr_b),
+            AccountVal::from_parts(2, [0x02u8; 32], [0u8; 32]),
+        );
+        state.storage.insert(
+            make_storage_key(addr_a, [0x01u8; 32]),
+            U256Val::new([0x0au8; 32]),
+        );
+        state.storage.insert(
+            make_storage_key(addr_b, [0x02u8; 32]),
+            U256Val::new([0x0bu8; 32]),
+        );
+    });
+    let incremental =
+        with_state_mut(|state| compute_state_root_incremental_with(state, &[addr_a, addr_b]));
+    let full = with_state(compute_state_root_with);
+    assert_eq!(incremental, full);
+}
+
+#[test]
+fn state_root_sampling_verify_and_skip_counters_update() {
+    init_stable_state();
+    let addr = [0x77u8; 20];
+    with_state_mut(|state| {
+        state.accounts.insert(
+            make_account_key(addr),
+            AccountVal::from_parts(1, [0x01u8; 32], [0u8; 32]),
+        );
+    });
+    with_state_mut(|state| {
+        let summary = TouchedSummary {
+            accounts_count: 1,
+            slots_count: 0,
+            delta_digest: [0u8; 32],
+        };
+        let _ =
+            commit_state_root_with(state, &[addr], summary, 1, [0u8; 32], 1).expect("commit root");
+        let metrics = *state.state_root_metrics.get();
+        assert_eq!(metrics.state_root_verify_count, 1);
+    });
+    with_state_mut(|state| {
+        let summary = TouchedSummary {
+            accounts_count: 100,
+            slots_count: 1000,
+            delta_digest: [1u8; 32],
+        };
+        let _ =
+            commit_state_root_with(state, &[addr], summary, 2, [0u8; 32], 2).expect("commit root");
+        let metrics = *state.state_root_metrics.get();
+        assert_eq!(metrics.state_root_verify_skipped_count, 1);
+    });
+}
+
+#[test]
+fn state_root_commit_does_not_fail_without_reference_verify() {
+    init_stable_state();
+    let addr_a = [0x81u8; 20];
+    let addr_b = [0x82u8; 20];
+    with_state_mut(|state| {
+        state.accounts.insert(
+            make_account_key(addr_a),
+            AccountVal::from_parts(1, [0u8; 32], [0u8; 32]),
+        );
+        state.storage.insert(
+            make_storage_key(addr_a, [0x01u8; 32]),
+            U256Val::new([0x11u8; 32]),
+        );
+        let summary = TouchedSummary {
+            accounts_count: 1,
+            slots_count: 1,
+            delta_digest: [0u8; 32],
+        };
+        let _ = commit_state_root_with(state, &[addr_a], summary, 1, [0x22u8; 32], 11)
+            .expect("first commit");
+    });
+    with_state_mut(|state| {
+        let before_meta = *state.state_root_meta.get();
+        let before_root_cache = state.state_storage_roots.len();
+        state.accounts.insert(
+            make_account_key(addr_b),
+            AccountVal::from_parts(1, [0u8; 32], [0u8; 32]),
+        );
+        state.storage.insert(
+            make_storage_key(addr_b, [0x02u8; 32]),
+            U256Val::new([0x22u8; 32]),
+        );
+        let summary = TouchedSummary {
+            accounts_count: 1,
+            slots_count: 1,
+            delta_digest: [0x33u8; 32],
+        };
+        let out = commit_state_root_with(state, &[addr_b], summary, 2, [0x44u8; 32], 12)
+            .expect("commit should not fail without reference verify");
+        assert_ne!(out, before_meta.state_root);
+        let metrics = *state.state_root_metrics.get();
+        assert_eq!(metrics.state_root_mismatch_count, 0);
+        assert_ne!(*state.state_root_meta.get(), before_meta);
+        assert!(state.state_storage_roots.len() >= before_root_cache);
+        assert!(state.state_root_mismatch.get(&2).is_none());
+    });
+}
+
+#[test]
+fn node_db_metrics_are_updated() {
+    init_stable_state();
+    let addr = [0x91u8; 20];
+    with_state_mut(|state| {
+        state.accounts.insert(
+            make_account_key(addr),
+            AccountVal::from_parts(1, [0u8; 32], [0u8; 32]),
+        );
+        for i in 0..130u64 {
+            state.accounts.insert(
+                make_account_key(addr),
+                AccountVal::from_parts(i + 1, [0u8; 32], [0u8; 32]),
+            );
+            let summary = TouchedSummary {
+                accounts_count: 1,
+                slots_count: 0,
+                delta_digest: [u8::try_from(i & 0xff).unwrap_or(0); 32],
+            };
+            let _ = commit_state_root_with(state, &[addr], summary, i + 1, [0u8; 32], i + 1)
+                .expect("commit must succeed");
+        }
+        let metrics = *state.state_root_metrics.get();
+        assert!(metrics.node_db_entries > 0);
+        assert!(metrics.node_db_reachable > 0);
+        assert_eq!(metrics.node_db_unreachable, 0);
+    });
+}
+
+#[test]
 fn zero_code_hash_account_is_treated_as_empty_code_hash() {
     init_stable_state();
     let addr = [0x44u8; 20];
@@ -134,6 +278,47 @@ fn zero_code_hash_account_is_treated_as_empty_code_hash() {
         hex32(root),
         "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
     );
+}
+
+#[test]
+fn commit_state_root_noop_fast_path_uses_current_root() {
+    init_stable_state();
+    with_state_mut(|state| {
+        let baseline = commit_state_root_with(
+            state,
+            &[],
+            TouchedSummary {
+                accounts_count: 1,
+                slots_count: 1,
+                delta_digest: [1u8; 32],
+            },
+            1,
+            [0u8; 32],
+            1,
+        )
+        .expect("baseline commit");
+        let before = *state.state_root_metrics.get();
+        let root = commit_state_root_with(
+            state,
+            &[],
+            TouchedSummary {
+                accounts_count: 0,
+                slots_count: 0,
+                delta_digest: [0u8; 32],
+            },
+            2,
+            [0u8; 32],
+            2,
+        )
+        .expect("noop fast-path commit");
+        assert_eq!(root, baseline);
+        let after = *state.state_root_metrics.get();
+        assert_eq!(after.state_root_verify_count, before.state_root_verify_count);
+        assert_eq!(
+            after.state_root_verify_skipped_count,
+            before.state_root_verify_skipped_count.saturating_add(1)
+        );
+    });
 }
 
 fn hex32(value: [u8; 32]) -> String {

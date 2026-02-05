@@ -10,6 +10,7 @@ pub mod revm_db;
 pub mod revm_exec;
 pub mod selfdestruct;
 pub mod state_root;
+pub(crate) mod trie_commit;
 pub(crate) mod time;
 pub mod tx_decode;
 pub(crate) mod tx_decode_deposit;

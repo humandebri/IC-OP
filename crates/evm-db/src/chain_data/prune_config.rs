@@ -1,9 +1,9 @@
 //! どこで: pruning設定とメトリクス / 何を: policy+状態の固定サイズ / なぜ: upgrade耐性と安全運用のため
 
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
-use crate::corrupt_log::record_corrupt;
 
 const PRUNE_CONFIG_SIZE_U32: u32 = 112;
 const NONE_U64: u64 = u64::MAX;
@@ -77,7 +77,7 @@ impl PruneConfigV1 {
         }
     }
 
-pub fn set_policy(&mut self, policy: PrunePolicy) {
+    pub fn set_policy(&mut self, policy: PrunePolicy) {
         self.target_bytes = policy.target_bytes;
         self.retain_days = policy.retain_days;
         self.retain_blocks = policy.retain_blocks;
@@ -87,7 +87,8 @@ pub fn set_policy(&mut self, policy: PrunePolicy) {
         self.max_ops_per_tick = policy.max_ops_per_tick;
         self.high_water_bytes = compute_high_water(policy.target_bytes, policy.headroom_ratio_bps);
         self.low_water_bytes = compute_low_water(policy.target_bytes, policy.headroom_ratio_bps);
-        self.hard_emergency_bytes = compute_ratio_bytes(policy.target_bytes, policy.hard_emergency_ratio_bps);
+        self.hard_emergency_bytes =
+            compute_ratio_bytes(policy.target_bytes, policy.hard_emergency_ratio_bps);
     }
 
     pub fn oldest_block(&self) -> Option<u64> {
@@ -127,7 +128,11 @@ impl Storable for PruneConfigV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         let mut out = [0u8; PRUNE_CONFIG_SIZE_U32 as usize];
         out[0..4].copy_from_slice(&self.schema_version.to_be_bytes());
-        out[4] = flags(self.pruning_enabled, self.prune_running, self.prune_scheduled);
+        out[4] = flags(
+            self.pruning_enabled,
+            self.prune_running,
+            self.prune_scheduled,
+        );
         out[8..16].copy_from_slice(&self.target_bytes.to_be_bytes());
         out[16..24].copy_from_slice(&self.retain_days.to_be_bytes());
         out[24..32].copy_from_slice(&self.retain_blocks.to_be_bytes());
@@ -262,7 +267,9 @@ fn compute_low_water(target: u64, headroom_bps: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_high_water, compute_low_water, compute_ratio_bytes, PruneConfigV1, PrunePolicy};
+    use super::{
+        compute_high_water, compute_low_water, compute_ratio_bytes, PruneConfigV1, PrunePolicy,
+    };
 
     #[test]
     fn ratio_bytes_rounds_down() {

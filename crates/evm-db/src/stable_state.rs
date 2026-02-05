@@ -2,14 +2,15 @@
 
 use crate::blob_ptr::BlobPtr;
 use crate::blob_store::BlobStore;
-use crate::memory::{get_memory, AppMemoryId, VMem};
-use crate::chain_data::{
-    CallerKey, ChainStateV1, Head, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, MetricsStateV1,
-    OpsConfigV1, OpsMetricsV1, OpsStateV1, PruneConfigV1, SystemTxHealthV1,
-    PruneJournal, PruneStateV1, QueueMeta, SenderKey, SenderNonceKey, StoredTxBytes, TxId,
-    ReadyKey,
-};
 use crate::chain_data::constants::CHAIN_ID;
+use crate::chain_data::{
+    CallerKey, ChainStateV1, DroppedRingStateV1, GcStateV1, HashKey, Head, L1BlockInfoParamsV1,
+    L1BlockInfoSnapshotV1, MetricsStateV1, MigrationStateV1, MismatchRecordV1, NodeRecord,
+    OpsConfigV1, OpsMetricsV1, OpsStateV1, PruneConfigV1, PruneJournal, PruneStateV1, QueueMeta,
+    ReadyKey, SenderKey, SenderNonceKey, StateRootMetaV1, StateRootMetricsV1, StoredTxBytes,
+    SystemTxHealthV1, TxId,
+};
+use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
 use crate::types::values::{AccountVal, CodeVal, U256Val};
 use ic_stable_structures::{StableBTreeMap, StableCell};
@@ -34,6 +35,13 @@ pub type PendingMetaByTxId = StableBTreeMap<TxId, SenderNonceKey, VMem>;
 pub type SenderExpectedNonce = StableBTreeMap<SenderKey, u64, VMem>;
 pub type PendingCurrentBySender = StableBTreeMap<SenderKey, TxId, VMem>;
 pub type PruneJournalMap = StableBTreeMap<u64, PruneJournal, VMem>;
+pub type MinerAllowlist = StableBTreeMap<CallerKey, u8, VMem>;
+pub type DroppedRing = StableBTreeMap<u64, TxId, VMem>;
+pub type StateStorageRoots = StableBTreeMap<AccountKey, U256Val, VMem>;
+pub type StateRootMismatch = StableBTreeMap<u64, MismatchRecordV1, VMem>;
+pub type StateRootNodeDb = StableBTreeMap<HashKey, NodeRecord, VMem>;
+pub type StateRootAccountLeafHash = StableBTreeMap<AccountKey, HashKey, VMem>;
+pub type StateRootGcQueue = StableBTreeMap<u64, HashKey, VMem>;
 
 pub struct StableState {
     pub accounts: Accounts,
@@ -68,6 +76,18 @@ pub struct StableState {
     pub pending_meta_by_tx_id: PendingMetaByTxId,
     pub sender_expected_nonce: SenderExpectedNonce,
     pub pending_current_by_sender: PendingCurrentBySender,
+    pub miner_allowlist: MinerAllowlist,
+    pub dropped_ring_state: StableCell<DroppedRingStateV1, VMem>,
+    pub dropped_ring: DroppedRing,
+    pub state_storage_roots: StateStorageRoots,
+    pub state_root_meta: StableCell<StateRootMetaV1, VMem>,
+    pub state_root_mismatch: StateRootMismatch,
+    pub state_root_metrics: StableCell<StateRootMetricsV1, VMem>,
+    pub state_root_migration: StableCell<MigrationStateV1, VMem>,
+    pub state_root_node_db: StateRootNodeDb,
+    pub state_root_account_leaf_hash: StateRootAccountLeafHash,
+    pub state_root_gc_queue: StateRootGcQueue,
+    pub state_root_gc_state: StableCell<GcStateV1, VMem>,
 }
 
 thread_local! {
@@ -133,6 +153,34 @@ pub fn init_stable_state() {
     let sender_expected_nonce = StableBTreeMap::init(get_memory(AppMemoryId::SenderExpectedNonce));
     let pending_current_by_sender =
         StableBTreeMap::init(get_memory(AppMemoryId::PendingCurrentBySender));
+    let miner_allowlist = StableBTreeMap::init(get_memory(AppMemoryId::MinerAllowlist));
+    let dropped_ring_state = StableCell::init(
+        get_memory(AppMemoryId::DroppedRingState),
+        DroppedRingStateV1::new(),
+    );
+    let dropped_ring = StableBTreeMap::init(get_memory(AppMemoryId::DroppedRing));
+    let state_storage_roots = StableBTreeMap::init(get_memory(AppMemoryId::StateStorageRoots));
+    let state_root_meta = StableCell::init(
+        get_memory(AppMemoryId::StateRootMeta),
+        StateRootMetaV1::new(),
+    );
+    let state_root_mismatch = StableBTreeMap::init(get_memory(AppMemoryId::StateRootMismatch));
+    let state_root_metrics = StableCell::init(
+        get_memory(AppMemoryId::StateRootMetrics),
+        StateRootMetricsV1::new(),
+    );
+    let state_root_migration = StableCell::init(
+        get_memory(AppMemoryId::StateRootMigration),
+        MigrationStateV1::new_done(crate::meta::current_schema_version()),
+    );
+    let state_root_node_db = StableBTreeMap::init(get_memory(AppMemoryId::StateRootNodeDb));
+    let state_root_account_leaf_hash =
+        StableBTreeMap::init(get_memory(AppMemoryId::StateRootAccountLeafHash));
+    let state_root_gc_queue = StableBTreeMap::init(get_memory(AppMemoryId::StateRootGcQueue));
+    let state_root_gc_state = StableCell::init(
+        get_memory(AppMemoryId::StateRootGcState),
+        GcStateV1::new(),
+    );
     STABLE_STATE.with(|s| {
         *s.borrow_mut() = Some(StableState {
             accounts,
@@ -167,6 +215,18 @@ pub fn init_stable_state() {
             pending_meta_by_tx_id,
             sender_expected_nonce,
             pending_current_by_sender,
+            miner_allowlist,
+            dropped_ring_state,
+            dropped_ring,
+            state_storage_roots,
+            state_root_meta,
+            state_root_mismatch,
+            state_root_metrics,
+            state_root_migration,
+            state_root_node_db,
+            state_root_account_leaf_hash,
+            state_root_gc_queue,
+            state_root_gc_state,
         });
     });
 }

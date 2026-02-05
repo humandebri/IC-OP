@@ -50,6 +50,18 @@ pub enum AppMemoryId {
     L1BlockInfoSnapshot = 38,
     OpsMetrics = 39,
     SystemTxHealth = 40,
+    MinerAllowlist = 41,
+    DroppedRingState = 42,
+    DroppedRing = 43,
+    StateStorageRoots = 44,
+    StateRootMeta = 45,
+    StateRootMismatch = 46,
+    StateRootMetrics = 47,
+    StateRootMigration = 48,
+    StateRootNodeDb = 49,
+    StateRootAccountLeafHash = 50,
+    StateRootGcQueue = 51,
+    StateRootGcState = 52,
 }
 
 impl AppMemoryId {
@@ -96,6 +108,18 @@ impl AppMemoryId {
             AppMemoryId::L1BlockInfoSnapshot => 38,
             AppMemoryId::OpsMetrics => 39,
             AppMemoryId::SystemTxHealth => 40,
+            AppMemoryId::MinerAllowlist => 41,
+            AppMemoryId::DroppedRingState => 42,
+            AppMemoryId::DroppedRing => 43,
+            AppMemoryId::StateStorageRoots => 44,
+            AppMemoryId::StateRootMeta => 45,
+            AppMemoryId::StateRootMismatch => 46,
+            AppMemoryId::StateRootMetrics => 47,
+            AppMemoryId::StateRootMigration => 48,
+            AppMemoryId::StateRootNodeDb => 49,
+            AppMemoryId::StateRootAccountLeafHash => 50,
+            AppMemoryId::StateRootGcQueue => 51,
+            AppMemoryId::StateRootGcState => 52,
         }
     }
 

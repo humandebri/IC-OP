@@ -1,6 +1,8 @@
 //! どこで: Phase1のブロックモデル / 何を: BlockDataとHead / なぜ: 決定的なブロック保存のため
 
-use crate::chain_data::constants::{HASH_LEN, HASH_LEN_U32, MAX_BLOCK_DATA_SIZE_U32, MAX_TXS_PER_BLOCK};
+use crate::chain_data::constants::{
+    HASH_LEN, HASH_LEN_U32, MAX_BLOCK_DATA_SIZE_U32, MAX_TXS_PER_BLOCK,
+};
 use crate::chain_data::tx::TxId;
 use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;

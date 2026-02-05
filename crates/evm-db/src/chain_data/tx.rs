@@ -1,9 +1,9 @@
 //! どこで: Phase1のTxモデル / 何を: StoredTxBytesとID / なぜ: stableは生bytesを安全に保持するため
 
-use crate::corrupt_log::record_corrupt;
 use crate::chain_data::constants::{
     MAX_PRINCIPAL_LEN, MAX_TX_SIZE, MAX_TX_SIZE_U32, TX_ID_LEN, TX_ID_LEN_U32,
 };
+use crate::corrupt_log::record_corrupt;
 use crate::decode::hash_to_array;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
@@ -318,7 +318,15 @@ fn placeholder_hash(raw: &[u8]) -> [u8; TX_ID_LEN] {
 
 fn encode(inner: &StoredTxBytes) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        1 + 1 + TX_ID_LEN + 1 + 20 + 16 + 16 + 2 + inner.canister_id.len() + 2
+        1 + 1
+            + TX_ID_LEN
+            + 1
+            + 20
+            + 16
+            + 16
+            + 2
+            + inner.canister_id.len()
+            + 2
             + inner.caller_principal.len()
             + 4
             + inner.raw.len(),
@@ -338,12 +346,12 @@ fn encode(inner: &StoredTxBytes) -> Vec<u8> {
     out.extend_from_slice(&caller);
     out.extend_from_slice(&inner.max_fee_per_gas.to_be_bytes());
     out.extend_from_slice(&inner.max_priority_fee_per_gas.to_be_bytes());
-    let canister_len =
-        u16::try_from(inner.canister_id.len()).unwrap_or_else(|_| ic_cdk::trap("tx_envelope: canister_id len overflow"));
+    let canister_len = u16::try_from(inner.canister_id.len())
+        .unwrap_or_else(|_| ic_cdk::trap("tx_envelope: canister_id len overflow"));
     out.extend_from_slice(&canister_len.to_be_bytes());
     out.extend_from_slice(&inner.canister_id);
-    let principal_len =
-        u16::try_from(inner.caller_principal.len()).unwrap_or_else(|_| ic_cdk::trap("tx_envelope: caller_principal len overflow"));
+    let principal_len = u16::try_from(inner.caller_principal.len())
+        .unwrap_or_else(|_| ic_cdk::trap("tx_envelope: caller_principal len overflow"));
     out.extend_from_slice(&principal_len.to_be_bytes());
     out.extend_from_slice(&inner.caller_principal);
     let len = len_to_u32(inner.raw.len(), "tx_envelope: len overflow");
@@ -420,7 +428,11 @@ fn decode_result(data: &[u8]) -> Result<StoredTxBytes, DecodeFailure<'_>> {
         return Err(DecodeFailure { raw: data });
     }
     let raw = data[offset..].to_vec();
-    let caller_evm = if (flags & (1 << 0)) != 0 { Some(caller) } else { None };
+    let caller_evm = if (flags & (1 << 0)) != 0 {
+        Some(caller)
+    } else {
+        None
+    };
     let is_dynamic_fee = (flags & (1 << 1)) != 0;
     Ok(StoredTxBytes {
         version,

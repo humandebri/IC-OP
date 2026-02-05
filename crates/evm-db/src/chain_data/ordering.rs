@@ -1,7 +1,7 @@
 //! どこで: Phase1.3の手数料順序 / 何を: ready_queue用キーとpendingキー / なぜ: 決定的な優先順とnonce待ちを両立するため
 
-use crate::decode::hash_to_array;
 use crate::corrupt_log::record_corrupt;
+use crate::decode::hash_to_array;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;

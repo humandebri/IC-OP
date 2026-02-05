@@ -1,20 +1,22 @@
 //! どこで: canister入口 / 何を: Phase1のAPI公開 / なぜ: submit中心の安全な運用導線を提供するため
 
-use candid::CandidType;
-use ic_cdk::api::{
-    accept_message, canister_cycle_balance, debug_print, is_controller,
-    msg_caller, msg_method_name, time,
-};
-use evm_db::chain_data::constants::{MAX_QUEUE_SNAPSHOT_LIMIT, MAX_RETURN_DATA, MAX_TX_SIZE};
+use candid::{CandidType, Principal};
+use evm_core::{chain, hash};
 use evm_db::chain_data::constants::CHAIN_ID;
+use evm_db::chain_data::constants::{MAX_QUEUE_SNAPSHOT_LIMIT, MAX_RETURN_DATA, MAX_TX_SIZE};
 use evm_db::chain_data::{
-    BlockData, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, OpsConfigV1, OpsMode, ReceiptLike, StoredTx, StoredTxBytes,
-    TxId, TxKind, TxLoc, TxLocKind,
+    BlockData, CallerKey, L1BlockInfoParamsV1, L1BlockInfoSnapshotV1, MigrationPhase, OpsConfigV1,
+    OpsMode, ReceiptLike, StoredTx, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind,
 };
-use evm_db::meta::{current_schema_version, ensure_meta_initialized, get_meta, mark_migration_applied};
+use evm_db::meta::{
+    current_schema_version, ensure_meta_initialized, get_meta, mark_migration_applied,
+};
 use evm_db::stable_state::{init_stable_state, with_state};
 use evm_db::upgrade;
-use evm_core::{chain, hash};
+use ic_cdk::api::{
+    accept_message, canister_cycle_balance, debug_print, is_controller, msg_caller,
+    msg_method_name, time,
+};
 use serde::Deserialize;
 
 #[cfg(target_arch = "wasm32")]
@@ -388,7 +390,8 @@ fn init(args: Option<InitArgs>) {
     for alloc in args.genesis_balances.iter() {
         let mut addr = [0u8; 20];
         addr.copy_from_slice(&alloc.address);
-        chain::dev_mint(addr, alloc.amount).unwrap_or_else(|_| ic_cdk::trap("init: genesis mint failed"));
+        chain::dev_mint(addr, alloc.amount)
+            .unwrap_or_else(|_| ic_cdk::trap("init: genesis mint failed"));
     }
     observe_cycles();
     schedule_cycle_observer();
@@ -439,6 +442,7 @@ fn inspect_method_allowed(method: &str) -> bool {
             | "set_ops_config"
             | "set_l1_block_info_params"
             | "set_l1_block_info_snapshot"
+            | "set_miner_allowlist"
             | "prune_blocks"
             | "produce_block"
     )
@@ -487,7 +491,7 @@ fn map_execute_chain_result(
         }
         Err(err) => {
             debug_print(format!("execute_tx err: {:?}", err));
-            return Err(ExecuteTxError::Internal(format!("{:?}", err)));
+            return Err(ExecuteTxError::Internal("internal error".to_string()));
         }
     };
     Ok(ExecResultDto {
@@ -514,7 +518,9 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
             return Err(SubmitTxError::InvalidArgument("decode failed".to_string()));
         }
         Err(chain::ChainError::UnsupportedTxKind) => {
-            return Err(SubmitTxError::InvalidArgument("unsupported tx kind".to_string()));
+            return Err(SubmitTxError::InvalidArgument(
+                "unsupported tx kind".to_string(),
+            ));
         }
         Err(chain::ChainError::TxAlreadySeen) => {
             return Err(SubmitTxError::Rejected("tx already seen".to_string()));
@@ -539,7 +545,7 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         }
         Err(err) => {
             debug_print(format!("submit_eth_tx err: {:?}", err));
-            return Err(SubmitTxError::Internal(format!("{:?}", err)));
+            return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
     schedule_mining();
@@ -566,7 +572,9 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
             return Err(SubmitTxError::InvalidArgument("decode failed".to_string()));
         }
         Err(chain::ChainError::UnsupportedTxKind) => {
-            return Err(SubmitTxError::InvalidArgument("unsupported tx kind".to_string()));
+            return Err(SubmitTxError::InvalidArgument(
+                "unsupported tx kind".to_string(),
+            ));
         }
         Err(chain::ChainError::TxAlreadySeen) => {
             return Err(SubmitTxError::Rejected("tx already seen".to_string()));
@@ -591,7 +599,7 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
         }
         Err(err) => {
             debug_print(format!("submit_ic_tx err: {:?}", err));
-            return Err(SubmitTxError::Internal(format!("{:?}", err)));
+            return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
     schedule_mining();
@@ -618,6 +626,9 @@ fn dev_mint(address: Vec<u8>, amount: u128) {
 
 #[ic_cdk::update]
 fn produce_block(max_txs: u32) -> Result<ProduceBlockStatus, ProduceBlockError> {
+    if let Err(reason) = require_producer_write() {
+        return Err(ProduceBlockError::Internal(reason));
+    }
     if migration_pending() {
         return Ok(ProduceBlockStatus::NoOp {
             reason: NoOpReason::NeedsMigration,
@@ -668,7 +679,7 @@ fn produce_block(max_txs: u32) -> Result<ProduceBlockStatus, ProduceBlockError> 
         )),
         Err(err) => {
             debug_print(format!("produce_block err: {:?}", err));
-            Err(ProduceBlockError::Internal(format!("{:?}", err)))
+            Err(ProduceBlockError::Internal("internal error".to_string()))
         }
     }
 }
@@ -727,8 +738,8 @@ fn export_blocks(
         segment: value.segment,
         byte_offset: value.byte_offset,
     });
-    let result = evm_core::export::export_blocks(core_cursor, max_bytes)
-        .map_err(export_error_to_view)?;
+    let result =
+        evm_core::export::export_blocks(core_cursor, max_bytes).map_err(export_error_to_view)?;
     Ok(ExportResponseView {
         chunks: result
             .chunks
@@ -869,7 +880,9 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
             return Err(SubmitTxError::InvalidArgument("decode failed".to_string()));
         }
         Err(chain::ChainError::UnsupportedTxKind) => {
-            return Err(SubmitTxError::InvalidArgument("unsupported tx kind".to_string()));
+            return Err(SubmitTxError::InvalidArgument(
+                "unsupported tx kind".to_string(),
+            ));
         }
         Err(chain::ChainError::TxAlreadySeen) => {
             return Err(SubmitTxError::Rejected("tx already seen".to_string()));
@@ -894,11 +907,44 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
         }
         Err(err) => {
             debug_print(format!("rpc_eth_send_raw_transaction err: {:?}", err));
-            return Err(SubmitTxError::Internal(format!("{:?}", err)));
+            return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
     schedule_mining();
     Ok(tx_id.0.to_vec())
+}
+
+#[ic_cdk::query]
+fn get_miner_allowlist() -> Vec<Principal> {
+    with_state(|state| {
+        let mut out = Vec::new();
+        for entry in state.miner_allowlist.iter() {
+            if let Some(principal) = caller_key_to_principal(*entry.key()) {
+                out.push(principal);
+            }
+        }
+        out
+    })
+}
+
+#[ic_cdk::update]
+fn set_miner_allowlist(principals: Vec<Principal>) -> Result<(), String> {
+    require_manage_write()?;
+    evm_db::stable_state::with_state_mut(|state| {
+        let old_keys: Vec<_> = state
+            .miner_allowlist
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        for key in old_keys {
+            state.miner_allowlist.remove(&key);
+        }
+        for principal in principals {
+            let key = caller_key_from_principal(principal);
+            state.miner_allowlist.insert(key, 1u8);
+        }
+    });
+    Ok(())
 }
 
 #[ic_cdk::query]
@@ -1092,7 +1138,7 @@ fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResultView, ProduceBlo
         Err(chain::ChainError::InvalidLimit) => Err(ProduceBlockError::InvalidArgument(
             "retain/max_ops must be > 0".to_string(),
         )),
-        Err(err) => Err(ProduceBlockError::Internal(format!("{:?}", err))),
+        Err(_err) => Err(ProduceBlockError::Internal("internal error".to_string())),
     }
 }
 
@@ -1292,22 +1338,21 @@ fn envelope_to_eth_view(
         TxKind::IcSynthetic => stored.caller_evm.unwrap_or([0u8; 20]),
         TxKind::EthSigned | TxKind::OpDeposit => [0u8; 20],
     };
-    let decoded = if let Ok(decoded) =
-        evm_core::tx_decode::decode_tx_view(kind, caller, &stored.raw)
-    {
-        Some(DecodedTxView {
-            from: decoded.from.to_vec(),
-            to: decoded.to.map(|addr| addr.to_vec()),
-            nonce: decoded.nonce,
-            value: decoded.value.to_vec(),
-            input: decoded.input,
-            gas_limit: decoded.gas_limit,
-            gas_price: decoded.gas_price,
-            chain_id: decoded.chain_id,
-        })
-    } else {
-        None
-    };
+    let decoded =
+        if let Ok(decoded) = evm_core::tx_decode::decode_tx_view(kind, caller, &stored.raw) {
+            Some(DecodedTxView {
+                from: decoded.from.to_vec(),
+                to: decoded.to.map(|addr| addr.to_vec()),
+                nonce: decoded.nonce,
+                value: decoded.value.to_vec(),
+                input: decoded.input,
+                gas_limit: decoded.gas_limit,
+                gas_price: decoded.gas_price,
+                chain_id: decoded.chain_id,
+            })
+        } else {
+            None
+        };
 
     Some(EthTxView {
         hash: stored.tx_id.0.to_vec(),
@@ -1413,9 +1458,44 @@ fn require_manage_write() -> Result<(), String> {
     Ok(())
 }
 
+fn require_producer_write() -> Result<(), String> {
+    if let Some(reason) = reject_write_reason() {
+        return Err(reason);
+    }
+    let caller = msg_caller();
+    if is_controller(&caller) {
+        return Ok(());
+    }
+    let key = CallerKey::from_principal_bytes(caller.as_slice());
+    let allowed = with_state(|state| state.miner_allowlist.get(&key).is_some());
+    if !allowed {
+        return Err("auth.producer_required".to_string());
+    }
+    Ok(())
+}
+
+fn caller_key_from_principal(principal: Principal) -> CallerKey {
+    CallerKey::from_principal_bytes(principal.as_slice())
+}
+
+fn caller_key_to_principal(key: CallerKey) -> Option<Principal> {
+    let len = usize::from(key.0[0]);
+    if len == 0 || len > 29 {
+        return None;
+    }
+    Some(Principal::from_slice(&key.0[1..1 + len]))
+}
+
 fn migration_pending() -> bool {
     let meta = get_meta();
-    meta.needs_migration || meta.schema_version < current_schema_version()
+    if meta.needs_migration || meta.schema_version < current_schema_version() {
+        return true;
+    }
+    let pending = with_state(|state| state.state_root_migration.get().phase != MigrationPhase::Done);
+    if !pending {
+        return false;
+    }
+    !chain::state_root_migration_tick(512)
 }
 
 fn observe_cycles() -> OpsMode {
@@ -1429,7 +1509,10 @@ fn observe_cycles() -> OpsMode {
                 ops.safe_stop_latched = true;
             }
             OpsMode::Critical
-        } else if ops.safe_stop_latched && config.freeze_on_critical && balance < config.low_watermark {
+        } else if ops.safe_stop_latched
+            && config.freeze_on_critical
+            && balance < config.low_watermark
+        {
             OpsMode::Critical
         } else {
             if balance >= config.low_watermark {
@@ -1485,7 +1568,20 @@ fn apply_post_upgrade_migrations() {
         to = 2;
     }
     if to != from || meta.needs_migration {
+        evm_db::stable_state::with_state_mut(|state| {
+            let mut migration = *state.state_root_migration.get();
+            if migration.phase == MigrationPhase::Done {
+                migration.phase = MigrationPhase::Init;
+                migration.cursor = 0;
+                migration.last_error = 0;
+                migration.schema_version_target = current_schema_version();
+                state.state_root_migration.set(migration);
+            }
+        });
         mark_migration_applied(from, to, time());
+    }
+    if migration_pending() {
+        let _ = chain::state_root_migration_tick(1024);
     }
 }
 
@@ -1601,7 +1697,9 @@ fn mining_tick() {
 
 #[ic_cdk::query]
 fn get_queue_snapshot(limit: u32, cursor: Option<u64>) -> QueueSnapshotView {
-    let limit = usize::try_from(limit).unwrap_or(0).min(MAX_QUEUE_SNAPSHOT_LIMIT);
+    let limit = usize::try_from(limit)
+        .unwrap_or(0)
+        .min(MAX_QUEUE_SNAPSHOT_LIMIT);
     let snapshot = chain::get_queue_snapshot(limit, cursor);
     let mut items = Vec::with_capacity(snapshot.items.len());
     for item in snapshot.items.into_iter() {
@@ -1630,10 +1728,10 @@ mod tests {
         clamp_return_data, exec_error_to_code, inspect_method_allowed, is_valid_l1_spec_id,
         map_execute_chain_result, tx_id_from_bytes, ExecuteTxError,
     };
-    use evm_db::chain_data::constants::MAX_RETURN_DATA;
-    use evm_db::chain_data::TxId;
     use evm_core::chain::{ChainError, ExecResult};
     use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
+    use evm_db::chain_data::constants::MAX_RETURN_DATA;
+    use evm_db::chain_data::TxId;
 
     #[test]
     fn clamp_return_data_rejects_oversize() {
@@ -1676,7 +1774,9 @@ mod tests {
     #[test]
     fn exec_error_codes_match_fixed_pattern() {
         let inputs = [
-            Some(ExecError::Decode(evm_core::tx_decode::DecodeError::InvalidRlp)),
+            Some(ExecError::Decode(
+                evm_core::tx_decode::DecodeError::InvalidRlp,
+            )),
             Some(ExecError::TxError(OpTransactionError::TxBuildFailed)),
             Some(ExecError::TxError(OpTransactionError::TxRejectedByPolicy)),
             Some(ExecError::TxError(OpTransactionError::TxPrecheckFailed)),
@@ -1690,7 +1790,9 @@ mod tests {
             Some(ExecError::EvmHalt(OpHaltReason::StackOverflow)),
             Some(ExecError::EvmHalt(OpHaltReason::StackUnderflow)),
             Some(ExecError::EvmHalt(OpHaltReason::InvalidJump)),
-            Some(ExecError::EvmHalt(OpHaltReason::StateChangeDuringStaticCall)),
+            Some(ExecError::EvmHalt(
+                OpHaltReason::StateChangeDuringStaticCall,
+            )),
             Some(ExecError::EvmHalt(OpHaltReason::PrecompileError)),
             Some(ExecError::EvmHalt(OpHaltReason::Unknown)),
             Some(ExecError::InvalidL1SpecId(99)),
@@ -1747,6 +1849,7 @@ mod tests {
     fn inspect_allowlist_accepts_known_methods() {
         assert!(inspect_method_allowed("submit_ic_tx"));
         assert!(inspect_method_allowed("set_pruning_enabled"));
+        assert!(inspect_method_allowed("set_miner_allowlist"));
     }
 
     #[test]
@@ -1764,11 +1867,8 @@ mod tests {
         if !value.starts_with("exec.") {
             return false;
         }
-        value.chars().all(|ch| {
-            ch == '.'
-                || ch == '_'
-                || ch.is_ascii_lowercase()
-                || ch.is_ascii_digit()
-        })
+        value
+            .chars()
+            .all(|ch| ch == '.' || ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
     }
 }

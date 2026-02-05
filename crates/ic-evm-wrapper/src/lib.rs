@@ -1474,7 +1474,11 @@ fn reject_write_reason() -> Option<String> {
 }
 
 fn reject_anonymous_update() -> Option<String> {
-    if msg_caller() == Principal::anonymous() {
+    reject_anonymous_principal(msg_caller())
+}
+
+fn reject_anonymous_principal(caller: Principal) -> Option<String> {
+    if caller == Principal::anonymous() {
         return Some("auth.anonymous_forbidden".to_string());
     }
     None
@@ -1660,8 +1664,9 @@ pub fn export_did() -> String {
 mod tests {
     use super::{
         clamp_return_data, exec_error_to_code, inspect_method_allowed, map_execute_chain_result,
-        tx_id_from_bytes, ExecuteTxError,
+        reject_anonymous_principal, tx_id_from_bytes, ExecuteTxError,
     };
+    use candid::Principal;
     use evm_core::chain::{ChainError, ExecResult};
     use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
@@ -1773,6 +1778,19 @@ mod tests {
     #[test]
     fn inspect_allowlist_rejects_unknown_methods() {
         assert!(!inspect_method_allowed("unknown_method"));
+    }
+
+    #[test]
+    fn reject_anonymous_principal_blocks_anonymous() {
+        let out = reject_anonymous_principal(Principal::anonymous());
+        assert_eq!(out, Some("auth.anonymous_forbidden".to_string()));
+    }
+
+    #[test]
+    fn reject_anonymous_principal_allows_non_anonymous() {
+        let principal = Principal::self_authenticating(b"wrapper-test-caller");
+        let out = reject_anonymous_principal(principal);
+        assert_eq!(out, None);
     }
 
     #[cfg(feature = "dev-faucet")]

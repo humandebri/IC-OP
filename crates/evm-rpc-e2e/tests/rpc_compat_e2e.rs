@@ -167,7 +167,10 @@ fn install_canister(pic: &PocketIc) -> Principal {
         }],
     });
     let init_arg = Encode!(&init).expect("encode init args");
-    install_canister_with_arg(pic, init_arg)
+    let canister_id = install_canister_with_arg(pic, init_arg);
+    pic.set_controllers(canister_id, Some(Principal::anonymous()), vec![caller])
+        .unwrap_or_else(|err| panic!("set_controllers error: {err}"));
+    canister_id
 }
 
 fn install_canister_with_arg(pic: &PocketIc, init_arg: Vec<u8>) -> Principal {
@@ -360,47 +363,23 @@ fn prune_blocks_requires_controller() {
 }
 
 #[test]
-fn anonymous_submit_ic_tx_is_rejected() {
+fn unprivileged_produce_block_is_rejected() {
     let pic = PocketIc::new();
     let canister_id = install_canister(&pic);
-    let tx_bytes = build_ic_tx_bytes([0x20u8; 20], 0);
+    let unprivileged = Principal::self_authenticating(b"unprivileged-producer");
     let out = call_update_as(
         &pic,
         canister_id,
-        Principal::anonymous(),
-        "submit_ic_tx",
-        Encode!(&tx_bytes).expect("encode submit"),
-    );
-    let result: SubmitTxResult = Decode!(&out, SubmitTxResult).expect("decode submit");
-    match result {
-        Ok(_) => panic!("anonymous submit must be rejected"),
-        Err(SubmitTxError::Rejected(message)) => {
-            assert!(
-                message.contains("auth.anonymous_forbidden"),
-                "unexpected message: {message}"
-            );
-        }
-        Err(other) => panic!("unexpected submit error: {other:?}"),
-    }
-}
-
-#[test]
-fn anonymous_produce_block_is_rejected() {
-    let pic = PocketIc::new();
-    let canister_id = install_canister(&pic);
-    let out = call_update_as(
-        &pic,
-        canister_id,
-        Principal::anonymous(),
+        unprivileged,
         "produce_block",
         Encode!(&1u32).expect("encode produce"),
     );
     let result: ProduceBlockResult = Decode!(&out, ProduceBlockResult).expect("decode produce");
     match result {
-        Ok(_) => panic!("anonymous produce_block must be rejected"),
+        Ok(_) => panic!("unprivileged produce_block must be rejected"),
         Err(ProduceBlockError::Internal(message)) => {
             assert!(
-                message.contains("auth.anonymous_forbidden"),
+                message.contains("auth.producer_required"),
                 "unexpected message: {message}"
             );
         }
@@ -409,22 +388,23 @@ fn anonymous_produce_block_is_rejected() {
 }
 
 #[test]
-fn anonymous_set_auto_mine_is_rejected() {
+fn unprivileged_set_auto_mine_is_rejected() {
     let pic = PocketIc::new();
     let canister_id = install_canister(&pic);
+    let unprivileged = Principal::self_authenticating(b"unprivileged-manager");
     let out = call_update_as(
         &pic,
         canister_id,
-        Principal::anonymous(),
+        unprivileged,
         "set_auto_mine",
         Encode!(&true).expect("encode set_auto_mine"),
     );
     let result: ManageWriteResult = Decode!(&out, ManageWriteResult).expect("decode set_auto_mine");
     match result {
-        Ok(()) => panic!("anonymous set_auto_mine must be rejected"),
+        Ok(()) => panic!("unprivileged set_auto_mine must be rejected"),
         Err(message) => {
             assert!(
-                message.contains("auth.anonymous_forbidden"),
+                message.contains("auth.controller_required"),
                 "unexpected message: {message}"
             );
         }

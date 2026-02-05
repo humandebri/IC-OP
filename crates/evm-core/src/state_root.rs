@@ -6,22 +6,24 @@ mod trie_update;
 
 use crate::hash::keccak256;
 use crate::revm_exec::StateDiff;
-use alloy_rlp::Encodable;
 use alloy_primitives::{Address, B256, U256};
-use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
+use alloy_rlp::Encodable;
 use alloy_trie::nodes::{BranchNode, ExtensionNode, LeafNode, RlpNode};
+use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
 use alloy_trie::{Nibbles, TrieMask};
 use alloy_trie::{TrieAccount, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use evm_db::chain_data::{HashKey, MigrationPhase, NodeRecord};
+use evm_db::memory::VMem;
 use evm_db::stable_state::StableState;
 use evm_db::types::keys::{make_account_key, make_storage_key, AccountKey};
-use evm_db::memory::VMem;
 use ic_stable_structures::StableBTreeMap;
 use ic_stable_structures::Storable;
-use std::collections::{BTreeMap, BTreeSet};
 use node_codec::rlp_node_to_root;
 use node_store::{apply_journal, AnchorDelta, JournalUpdate};
-use trie_update::{build_state_update_journal, build_state_update_journal_full, NodeDeltaCounts, NewNodeRecords};
+use std::collections::{BTreeMap, BTreeSet};
+use trie_update::{
+    build_state_update_journal, build_state_update_journal_full, NewNodeRecords, NodeDeltaCounts,
+};
 
 pub const VERIFY_SAMPLE_MOD: u64 = 1024;
 pub const VERIFY_MAX_TOUCHED_ACCOUNTS: u32 = 8;
@@ -402,7 +404,8 @@ fn build_trie_delta(state_diffs: &[StateDiff]) -> TrieDelta {
             let mut addr = [0u8; 20];
             addr.copy_from_slice(address.as_ref());
             let account_delta = delta.accounts.entry(addr).or_default();
-            let deleted = account.is_selfdestructed() || (account.is_empty() && account.is_touched());
+            let deleted =
+                account.is_selfdestructed() || (account.is_empty() && account.is_touched());
             account_delta.deleted = deleted;
             account_delta.nonce = account.info.nonce;
             account_delta.balance = account.info.balance.to_be_bytes();
@@ -807,7 +810,10 @@ fn build_trie_nodes(
     let mut common_end = depth;
     while common_end < 64 {
         let nib = entries[0].key_nibbles[common_end];
-        if entries.iter().all(|entry| entry.key_nibbles[common_end] == nib) {
+        if entries
+            .iter()
+            .all(|entry| entry.key_nibbles[common_end] == nib)
+        {
             common_end = common_end.saturating_add(1);
         } else {
             break;
@@ -882,10 +888,7 @@ fn build_anchor_delta(
     out.state_root_new = node_codec::root_hash_key(new_state_root);
     for update in storage_updates {
         let key = make_account_key(update.addr);
-        let old_root = state
-            .state_storage_roots
-            .get(&key)
-            .map(|v| HashKey(v.0));
+        let old_root = state.state_storage_roots.get(&key).map(|v| HashKey(v.0));
         let new_root = update.storage_root.map(HashKey);
         if let Some(hash) = old_root {
             out.storage_root_old.push(hash);
@@ -916,7 +919,11 @@ fn apply_node_db_records(state: &mut StableState, records: Vec<(HashKey, NodeRec
         all_keys.insert(key);
     }
     for key in all_keys {
-        let before = state.state_root_node_db.get(&key).map(|v| i64::from(v.refcnt)).unwrap_or(0);
+        let before = state
+            .state_root_node_db
+            .get(&key)
+            .map(|v| i64::from(v.refcnt))
+            .unwrap_or(0);
         let after = next.get(&key).map(|v| i64::from(v.refcnt)).unwrap_or(0);
         let diff = after - before;
         if diff != 0 {
@@ -963,7 +970,11 @@ fn ensure_node_db_bootstrapped(state: &mut StableState) {
     if current_root == b256_to_bytes(EMPTY_ROOT_HASH) {
         return;
     }
-    if state.state_root_node_db.get(&HashKey(current_root)).is_some() {
+    if state
+        .state_root_node_db
+        .get(&HashKey(current_root))
+        .is_some()
+    {
         return;
     }
     let built = build_state_update_journal_full(state, &TrieDelta::default(), &[]);
@@ -1134,8 +1145,8 @@ mod tests {
     use super::*;
     use evm_db::chain_data::NodeRecord;
     use evm_db::stable_state::{init_stable_state, with_state_mut};
-    use evm_db::types::values::U256Val;
     use evm_db::types::keys::make_storage_key;
+    use evm_db::types::values::U256Val;
 
     #[test]
     fn node_db_refcnt_and_gc_follow_records() {
@@ -1207,12 +1218,10 @@ mod tests {
                     .map(|h| h.0),
                 Some(valid_hash.0)
             );
-            assert!(
-                state
-                    .state_root_account_leaf_hash
-                    .get(&make_account_key([0x22u8; 20]))
-                    .is_none()
-            );
+            assert!(state
+                .state_root_account_leaf_hash
+                .get(&make_account_key([0x22u8; 20]))
+                .is_none());
         });
     }
 

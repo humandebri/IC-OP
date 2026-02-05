@@ -1,9 +1,9 @@
 //! どこで: BlobStoreのポインタ / 何を: BlobPtrのStorable化 / なぜ: stable上の参照を固定長で持つため
 
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
-use crate::corrupt_log::record_corrupt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobPtr {

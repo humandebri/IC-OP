@@ -16,7 +16,11 @@ pub const MAX_CODE_SIZE_U32: u32 = 24 * 1024;
 pub struct AccountVal(pub [u8; ACCOUNT_VAL_LEN]);
 
 impl AccountVal {
-    pub fn from_parts(nonce: u64, balance: [u8; ACCOUNT_BALANCE_LEN], code_hash: [u8; ACCOUNT_CODE_HASH_LEN]) -> Self {
+    pub fn from_parts(
+        nonce: u64,
+        balance: [u8; ACCOUNT_BALANCE_LEN],
+        code_hash: [u8; ACCOUNT_CODE_HASH_LEN],
+    ) -> Self {
         let mut buf = [0u8; ACCOUNT_VAL_LEN];
         buf[0..ACCOUNT_NONCE_LEN].copy_from_slice(&nonce.to_be_bytes());
         buf[ACCOUNT_NONCE_LEN..ACCOUNT_NONCE_LEN + ACCOUNT_BALANCE_LEN].copy_from_slice(&balance);

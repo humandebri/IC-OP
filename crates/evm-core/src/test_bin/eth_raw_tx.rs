@@ -2,8 +2,8 @@
 
 use alloy_consensus::transaction::RlpEcdsaEncodableTx;
 use alloy_consensus::{SignableTransaction, TxLegacy};
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
 use alloy_primitives::B256;
+use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use std::env;

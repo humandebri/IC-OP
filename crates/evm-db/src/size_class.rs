@@ -15,13 +15,7 @@ pub const CLASS_2M: u32 = 2 * 1024 * 1024;
 pub const CLASS_4M: u32 = 4 * 1024 * 1024;
 
 const CLASSES: [u32; 7] = [
-    CLASS_64K,
-    CLASS_128K,
-    CLASS_256K,
-    CLASS_512K,
-    CLASS_1M,
-    CLASS_2M,
-    CLASS_4M,
+    CLASS_64K, CLASS_128K, CLASS_256K, CLASS_512K, CLASS_1M, CLASS_2M, CLASS_4M,
 ];
 
 pub fn smallest_class(len: usize) -> Result<u32, SizeClassError> {

@@ -18,9 +18,10 @@ use ic_cdk::api::{
 };
 use serde::Deserialize;
 use std::io::{self, Write};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tracing::{error, info, warn};
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::EnvFilter;
 
 #[cfg(target_arch = "wasm32")]
 getrandom::register_custom_getrandom!(always_fail_getrandom);
@@ -1493,13 +1494,15 @@ fn reject_anonymous_principal(caller: Principal) -> Option<String> {
 fn init_tracing() {
     static LOG_INIT: OnceLock<()> = OnceLock::new();
     let _ = LOG_INIT.get_or_init(|| {
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         let _ = tracing_subscriber::fmt()
             .json()
             .with_target(true)
             .with_current_span(false)
             .with_span_list(false)
             .with_writer(IcDebugPrintMakeWriter)
-            .with_env_filter("info")
+            .with_env_filter(env_filter)
             .try_init();
     });
 }
@@ -1511,23 +1514,50 @@ impl<'a> MakeWriter<'a> for IcDebugPrintMakeWriter {
     type Writer = IcDebugPrintWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        IcDebugPrintWriter
+        IcDebugPrintWriter {
+            buffer: String::new(),
+        }
     }
 }
 
-struct IcDebugPrintWriter;
+struct IcDebugPrintWriter {
+    buffer: String,
+}
 
 impl Write for IcDebugPrintWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let message = String::from_utf8_lossy(buf).trim().to_string();
-        if !message.is_empty() {
-            ic_cdk::api::debug_print(message);
-        }
+        self.buffer.push_str(&String::from_utf8_lossy(buf));
+        emit_complete_lines(&mut self.buffer);
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.trim().is_empty() {
+            ic_cdk::api::debug_print(self.buffer.trim().to_string());
+            self.buffer.clear();
+        }
         Ok(())
+    }
+}
+
+impl Drop for IcDebugPrintWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+fn emit_complete_lines(buffer: &mut String) {
+    static REENTRANT_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = REENTRANT_GUARD.get_or_init(|| Mutex::new(())).lock();
+    if guard.is_err() {
+        return;
+    }
+    while let Some(newline_index) = buffer.find('\n') {
+        let line: String = buffer.drain(..=newline_index).collect();
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            ic_cdk::api::debug_print(trimmed.to_string());
+        }
     }
 }
 

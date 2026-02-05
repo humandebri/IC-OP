@@ -16,8 +16,7 @@ fn fee_sorted_prefers_higher_effective_fee() {
     let high_fee_tx = build_ic_tx_bytes(2_000_000_000, 1_000_000_000, 0);
     let low_fee_tx = build_ic_tx_bytes(1_500_000_000, 1_000_000_000, 0);
 
-    let high_tx_id =
-        chain::submit_ic_tx(vec![0x11], vec![0x01], high_fee_tx).expect("submit high");
+    let high_tx_id = chain::submit_ic_tx(vec![0x11], vec![0x01], high_fee_tx).expect("submit high");
     let low_tx_id = chain::submit_ic_tx(vec![0x22], vec![0x02], low_fee_tx).expect("submit low");
 
     let block = chain::produce_block(2).expect("produce");

@@ -25,8 +25,8 @@ use evm_db::types::keys::make_account_key;
 use evm_db::types::values::AccountVal;
 use ic_stable_structures::StableBTreeMap;
 use ic_stable_structures::Storable;
-use revm::database_interface::DatabaseCommit;
 use revm::database::CacheDB;
+use revm::database_interface::DatabaseCommit;
 use revm::primitives::Address;
 use revm::primitives::U256;
 use std::borrow::Cow;
@@ -804,7 +804,12 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                     state
                         .tx_locs
                         .insert(*tx_id, TxLoc::included(number, outcome.tx_index));
-                    advance_sender_after_tx(state, *tx_id, Some(*sender_bytes), Some(*sender_nonce));
+                    advance_sender_after_tx(
+                        state,
+                        *tx_id,
+                        Some(*sender_bytes),
+                        Some(*sender_nonce),
+                    );
                 }
                 StagedIncludedTx::Failed {
                     tx_id,
@@ -823,8 +828,15 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
                     let receipt_ptr = store_receipt(state, receipt);
                     state.tx_index.insert(*tx_id, tx_index_ptr);
                     state.receipts.insert(*tx_id, receipt_ptr);
-                    state.tx_locs.insert(*tx_id, TxLoc::included(number, *tx_index));
-                    advance_sender_after_tx(state, *tx_id, Some(*sender_bytes), Some(*sender_nonce));
+                    state
+                        .tx_locs
+                        .insert(*tx_id, TxLoc::included(number, *tx_index));
+                    advance_sender_after_tx(
+                        state,
+                        *tx_id,
+                        Some(*sender_bytes),
+                        Some(*sender_nonce),
+                    );
                 }
             }
         }
@@ -1900,7 +1912,10 @@ enum RekeyError {
 
 #[cfg(test)]
 mod tests {
-    use super::{now_sec, observe_exec_error, observe_exec_outcome, record_exec_halt_unknown, set_test_now_sec};
+    use super::{
+        now_sec, observe_exec_error, observe_exec_outcome, record_exec_halt_unknown,
+        set_test_now_sec,
+    };
     use crate::revm_exec::{ExecError, OpHaltReason};
     use evm_db::chain_data::{ReceiptLike, TxId};
     use evm_db::stable_state::{init_stable_state, with_state};

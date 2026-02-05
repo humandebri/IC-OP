@@ -3,7 +3,9 @@
 use evm_core::chain::{self, ChainError};
 use evm_core::hash;
 use evm_db::chain_data::constants::{DROP_CODE_DECODE, DROP_CODE_INVALID_FEE};
-use evm_db::chain_data::{ReadyKey, SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind};
+use evm_db::chain_data::{
+    ReadyKey, SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind,
+};
 use evm_db::stable_state::{init_stable_state, with_state_mut};
 use evm_db::types::keys::{make_account_key, make_code_key};
 use evm_db::types::values::{AccountVal, CodeVal};
@@ -43,7 +45,12 @@ fn snapshot_tx_outcome_matrix_and_block_fields() {
 
     let matrix = format!(
         "tx_statuses=[{}, {}, {}] final_statuses=[{}, {}, {}]",
-        success.status, revert.status, halt.status, success.final_status, revert.final_status, halt.final_status
+        success.status,
+        revert.status,
+        halt.status,
+        success.final_status,
+        revert.final_status,
+        halt.final_status
     );
 
     let block = chain::get_block(3).expect("block #3");

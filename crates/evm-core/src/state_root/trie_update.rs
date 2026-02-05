@@ -1,8 +1,8 @@
 //! どこで: state root差分計算 / 何を: journal生成 / なぜ: apply境界を明確化し通常経路の全件再構築を避けるため
 
 use super::{
-    b256_to_bytes, build_anchor_delta, is_empty_trie_account, normalize_code_hash, AccountDelta, AnchorDelta,
-    StorageRootUpdate, TrieDelta,
+    b256_to_bytes, build_anchor_delta, is_empty_trie_account, normalize_code_hash, AccountDelta,
+    AnchorDelta, StorageRootUpdate, TrieDelta,
 };
 use crate::hash::keccak256;
 use alloy_primitives::{Address, B256, U256};
@@ -41,7 +41,11 @@ struct JournalBuilder<'a> {
 
 impl<'a> JournalBuilder<'a> {
     fn new(state: &'a StableState) -> Self {
-        Self { state, node_delta_counts: BTreeMap::new(), new_node_records: BTreeMap::new() }
+        Self {
+            state,
+            node_delta_counts: BTreeMap::new(),
+            new_node_records: BTreeMap::new(),
+        }
     }
 
     fn resolve_ptr(&self, ptr: &RlpNode) -> Option<TrieNode> {
@@ -67,14 +71,20 @@ impl<'a> JournalBuilder<'a> {
         let mut raw = Vec::new();
         let ptr = node.rlp(&mut raw);
         if let Some(hash) = ptr.as_hash() {
-            self.new_node_records.entry(HashKey(b256_to_bytes(hash))).or_insert(raw);
+            self.new_node_records
+                .entry(HashKey(b256_to_bytes(hash)))
+                .or_insert(raw);
         }
         ptr
     }
 
     fn replace_ptr(&mut self, old_ptr: Option<&RlpNode>, new_ptr: Option<&RlpNode>) {
-        let old_hash = old_ptr.and_then(|p| p.as_hash()).map(|h| HashKey(b256_to_bytes(h)));
-        let new_hash = new_ptr.and_then(|p| p.as_hash()).map(|h| HashKey(b256_to_bytes(h)));
+        let old_hash = old_ptr
+            .and_then(|p| p.as_hash())
+            .map(|h| HashKey(b256_to_bytes(h)));
+        let new_hash = new_ptr
+            .and_then(|p| p.as_hash())
+            .map(|h| HashKey(b256_to_bytes(h)));
         if old_hash == new_hash {
             return;
         }
@@ -138,7 +148,10 @@ pub fn build_state_update_journal(
                         U256::from_be_bytes(bytes).encode(&mut out);
                         out
                     });
-                    ops.push(KvOp { key, value: encoded });
+                    ops.push(KvOp {
+                        key,
+                        value: encoded,
+                    });
                 }
                 ops.sort_by(|a, b| a.key.cmp(&b.key));
                 let next_ptr = apply_ops(&mut builder, new_root_ptr.as_ref(), &ops);
@@ -220,7 +233,9 @@ pub fn build_state_update_journal(
             .storage_root
             .map(B256::from)
             .unwrap_or(EMPTY_ROOT_HASH);
-        let ptr = storage_root_ptr_after.get(&update.addr).and_then(|p| p.as_ref());
+        let ptr = storage_root_ptr_after
+            .get(&update.addr)
+            .and_then(|p| p.as_ref());
         force_root_record(&mut builder, root, ptr);
     }
 
@@ -304,7 +319,11 @@ fn account_after(
     }
 }
 
-fn account_from_state(state: &StableState, addr: [u8; 20], storage_root: B256) -> Option<TrieAccount> {
+fn account_from_state(
+    state: &StableState,
+    addr: [u8; 20],
+    storage_root: B256,
+) -> Option<TrieAccount> {
     let key = make_account_key(addr);
     let account = if let Some(a) = state.accounts.get(&key) {
         TrieAccount {
@@ -349,7 +368,11 @@ fn ptr_to_root(ptr: Option<&RlpNode>) -> B256 {
     }
 }
 
-fn apply_ops(builder: &mut JournalBuilder<'_>, root: Option<&RlpNode>, ops: &[KvOp]) -> Option<RlpNode> {
+fn apply_ops(
+    builder: &mut JournalBuilder<'_>,
+    root: Option<&RlpNode>,
+    ops: &[KvOp],
+) -> Option<RlpNode> {
     let mut current = root.cloned();
     for op in ops {
         current = apply_op(builder, current.as_ref(), &op.key, op.value.as_deref());
@@ -384,7 +407,9 @@ fn update_at(
     };
 
     match node {
-        TrieNode::EmptyRoot => value.map(|v| builder.emit_node(TrieNode::Leaf(LeafNode::new(rest, v.to_vec())))),
+        TrieNode::EmptyRoot => {
+            value.map(|v| builder.emit_node(TrieNode::Leaf(LeafNode::new(rest, v.to_vec()))))
+        }
         TrieNode::Leaf(leaf) => update_leaf(builder, ptr, leaf, &rest, value),
         TrieNode::Extension(ext) => update_extension(builder, ptr, ext, key, depth, value),
         TrieNode::Branch(branch) => update_branch(builder, ptr, branch, key, depth, value),
@@ -499,7 +524,10 @@ fn update_extension(
         return None;
     };
     let next = if common > 0 {
-        builder.emit_node(TrieNode::Extension(ExtensionNode::new(rest.slice(0..common), collapsed)))
+        builder.emit_node(TrieNode::Extension(ExtensionNode::new(
+            rest.slice(0..common),
+            collapsed,
+        )))
     } else {
         collapsed
     };
@@ -544,7 +572,10 @@ fn branch_children(branch: &BranchNode) -> [Option<RlpNode>; 16] {
     out
 }
 
-fn collapse_children(builder: &mut JournalBuilder<'_>, children: [Option<RlpNode>; 16]) -> Option<RlpNode> {
+fn collapse_children(
+    builder: &mut JournalBuilder<'_>,
+    children: [Option<RlpNode>; 16],
+) -> Option<RlpNode> {
     let mut present = Vec::new();
     for (idx, child) in children.iter().enumerate() {
         if child.is_some() {
@@ -558,7 +589,10 @@ fn collapse_children(builder: &mut JournalBuilder<'_>, children: [Option<RlpNode
             let (idx, child) = &present[0];
             let Some(child_node) = builder.resolve_ptr(child) else {
                 let prefix = Nibbles::from_nibbles_unchecked([*idx]);
-                return Some(builder.emit_node(TrieNode::Extension(ExtensionNode::new(prefix, child.clone()))));
+                return Some(builder.emit_node(TrieNode::Extension(ExtensionNode::new(
+                    prefix,
+                    child.clone(),
+                ))));
             };
             let prefix = Nibbles::from_nibbles_unchecked([*idx]);
             match child_node {
@@ -570,7 +604,10 @@ fn collapse_children(builder: &mut JournalBuilder<'_>, children: [Option<RlpNode
                     let key = prefix.join(&ext.key);
                     Some(builder.emit_node(TrieNode::Extension(ExtensionNode::new(key, ext.child))))
                 }
-                _ => Some(builder.emit_node(TrieNode::Extension(ExtensionNode::new(prefix, child.clone())))),
+                _ => Some(builder.emit_node(TrieNode::Extension(ExtensionNode::new(
+                    prefix,
+                    child.clone(),
+                )))),
             }
         }
         _ => {
@@ -584,7 +621,6 @@ fn collapse_children(builder: &mut JournalBuilder<'_>, children: [Option<RlpNode
         }
     }
 }
-
 
 pub fn build_state_update_journal_full(
     state: &StableState,

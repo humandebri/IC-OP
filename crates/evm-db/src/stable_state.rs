@@ -161,10 +161,8 @@ pub fn init_stable_state() {
     let state_root_account_leaf_hash =
         StableBTreeMap::init(get_memory(AppMemoryId::StateRootAccountLeafHash));
     let state_root_gc_queue = StableBTreeMap::init(get_memory(AppMemoryId::StateRootGcQueue));
-    let state_root_gc_state = StableCell::init(
-        get_memory(AppMemoryId::StateRootGcState),
-        GcStateV1::new(),
-    );
+    let state_root_gc_state =
+        StableCell::init(get_memory(AppMemoryId::StateRootGcState), GcStateV1::new());
     STABLE_STATE.with(|s| {
         *s.borrow_mut() = Some(StableState {
             accounts,

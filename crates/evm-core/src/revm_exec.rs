@@ -92,8 +92,15 @@ pub fn execute_tx(
     exec_ctx: &BlockExecContext,
     exec_path: ExecPath,
 ) -> Result<ExecOutcome, ExecError> {
-    let (outcome, _state_diff) =
-        execute_tx_on(RevmStableDb, tx_id, tx_index, tx_env, exec_ctx, exec_path, true)?;
+    let (outcome, _state_diff) = execute_tx_on(
+        RevmStableDb,
+        tx_id,
+        tx_index,
+        tx_env,
+        exec_ctx,
+        exec_path,
+        true,
+    )?;
     Ok(outcome)
 }
 
@@ -270,9 +277,7 @@ fn map_halt_reason(reason: HaltReason) -> OpHaltReason {
     }
 }
 
-fn map_tx_error_stage(
-    error: EVMError<core::convert::Infallible, InvalidTransaction>,
-) -> ExecError {
+fn map_tx_error_stage(error: EVMError<core::convert::Infallible, InvalidTransaction>) -> ExecError {
     match error {
         EVMError::Transaction(_) | EVMError::Header(_) => {
             ExecError::TxError(OpTransactionError::TxPrecheckFailed)

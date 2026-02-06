@@ -27,7 +27,7 @@ impl CallerKey {
 
 impl Storable for CallerKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        match encode_guarded(b"caller_key", self.0.to_vec(), CALLER_KEY_LEN as u32) {
+        match encode_guarded(b"caller_key", Cow::Borrowed(&self.0), CALLER_KEY_LEN as u32) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; CALLER_KEY_LEN]),
         }

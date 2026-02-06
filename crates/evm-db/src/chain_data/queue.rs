@@ -4,11 +4,29 @@ use crate::chain_data::codec::{encode_guarded, mark_decode_failure};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::U64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueueMeta {
     pub head: u64,
     pub tail: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct QueueMetaWire {
+    head: U64,
+    tail: U64,
+}
+
+impl QueueMetaWire {
+    fn new(head: u64, tail: u64) -> Self {
+        Self {
+            head: U64::new(head),
+            tail: U64::new(tail),
+        }
+    }
 }
 
 impl QueueMeta {
@@ -45,20 +63,16 @@ impl Default for QueueMeta {
 
 impl Storable for QueueMeta {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 16];
-        out[0..8].copy_from_slice(&self.head.to_be_bytes());
-        out[8..16].copy_from_slice(&self.tail.to_be_bytes());
-        match encode_guarded(b"queue_meta", out.to_vec(), 16) {
+        let wire = QueueMetaWire::new(self.head, self.tail);
+        match encode_guarded(b"queue_meta", Cow::Owned(wire.as_bytes().to_vec()), 16) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; 16]),
         }
     }
 
     fn into_bytes(self) -> Vec<u8> {
-        let mut out = [0u8; 16];
-        out[0..8].copy_from_slice(&self.head.to_be_bytes());
-        out[8..16].copy_from_slice(&self.tail.to_be_bytes());
-        out.to_vec()
+        let wire = QueueMetaWire::new(self.head, self.tail);
+        wire.as_bytes().to_vec()
     }
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
@@ -67,13 +81,16 @@ impl Storable for QueueMeta {
             mark_decode_failure(b"queue_meta", false);
             return QueueMeta::new();
         }
-        let mut head = [0u8; 8];
-        head.copy_from_slice(&data[0..8]);
-        let mut tail = [0u8; 8];
-        tail.copy_from_slice(&data[8..16]);
+        let wire = match QueueMetaWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_decode_failure(b"queue_meta", false);
+                return QueueMeta::new();
+            }
+        };
         Self {
-            head: u64::from_be_bytes(head),
-            tail: u64::from_be_bytes(tail),
+            head: wire.head.get(),
+            tail: wire.tail.get(),
         }
     }
 

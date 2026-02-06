@@ -6,6 +6,8 @@ use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{StableCell, Storable};
 use std::borrow::Cow;
 use tracing::warn;
+use zerocopy::byteorder::big_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 const META_MAGIC: [u8; 4] = *b"EVM0";
 const META_LAYOUT_VERSION: u32 = 2;
@@ -58,6 +60,36 @@ pub struct SchemaMigrationState {
     pub cursor_key: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct SchemaMigrationWire {
+    phase: u8,
+    cursor_key_set: u8,
+    _pad0: [u8; 6],
+    cursor: U64,
+    from_version: U32,
+    to_version: U32,
+    last_error: U32,
+    cursor_key: [u8; 32],
+    _pad1: [u8; 4],
+}
+
+impl SchemaMigrationWire {
+    fn new(state: &SchemaMigrationState) -> Self {
+        Self {
+            phase: state.phase as u8,
+            cursor_key_set: u8::from(state.cursor_key_set),
+            _pad0: [0u8; 6],
+            cursor: U64::new(state.cursor),
+            from_version: U32::new(state.from_version),
+            to_version: U32::new(state.to_version),
+            last_error: U32::new(state.last_error),
+            cursor_key: state.cursor_key,
+            _pad1: [0u8; 4],
+        }
+    }
+}
+
 impl SchemaMigrationState {
     pub fn done() -> Self {
         Self {
@@ -74,15 +106,8 @@ impl SchemaMigrationState {
 
 impl Storable for SchemaMigrationState {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; SCHEMA_MIGRATION_SIZE];
-        out[0] = self.phase as u8;
-        out[1] = u8::from(self.cursor_key_set);
-        out[8..16].copy_from_slice(&self.cursor.to_be_bytes());
-        out[16..20].copy_from_slice(&self.from_version.to_be_bytes());
-        out[20..24].copy_from_slice(&self.to_version.to_be_bytes());
-        out[24..28].copy_from_slice(&self.last_error.to_be_bytes());
-        out[28..60].copy_from_slice(&self.cursor_key);
-        Cow::Owned(out.to_vec())
+        let wire = SchemaMigrationWire::new(self);
+        Cow::Owned(wire.as_bytes().to_vec())
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -94,6 +119,24 @@ impl Storable for SchemaMigrationState {
         if data.len() != SCHEMA_MIGRATION_LEGACY_SIZE && data.len() != SCHEMA_MIGRATION_SIZE {
             record_corrupt(b"schema_migration_state");
             return Self::done();
+        }
+        if data.len() == SCHEMA_MIGRATION_SIZE {
+            let wire = match SchemaMigrationWire::read_from_bytes(data) {
+                Ok(value) => value,
+                Err(_) => {
+                    record_corrupt(b"schema_migration_state");
+                    return Self::done();
+                }
+            };
+            return Self {
+                phase: SchemaMigrationPhase::from_u8(wire.phase),
+                cursor: wire.cursor.get(),
+                from_version: wire.from_version.get(),
+                to_version: wire.to_version.get(),
+                last_error: wire.last_error.get(),
+                cursor_key_set: wire.cursor_key_set != 0,
+                cursor_key: wire.cursor_key,
+            };
         }
         let mut cursor = [0u8; 8];
         cursor.copy_from_slice(&data[8..16]);
@@ -140,6 +183,38 @@ pub struct Meta {
     pub last_migration_ts: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct MetaWire {
+    magic: [u8; 4],
+    layout_version: U32,
+    schema_hash: [u8; 32],
+    schema_version: U32,
+    needs_migration: u8,
+    active_tx_locs_v3: u8,
+    _pad0: [u8; 2],
+    last_migration_from: U32,
+    last_migration_to: U32,
+    last_migration_ts: U64,
+}
+
+impl MetaWire {
+    fn new(meta: &Meta) -> Self {
+        Self {
+            magic: meta.magic,
+            layout_version: U32::new(meta.layout_version),
+            schema_hash: meta.schema_hash,
+            schema_version: U32::new(meta.schema_version),
+            needs_migration: u8::from(meta.needs_migration),
+            active_tx_locs_v3: u8::from(meta.active_tx_locs_v3),
+            _pad0: [0u8; 2],
+            last_migration_from: U32::new(meta.last_migration_from),
+            last_migration_to: U32::new(meta.last_migration_to),
+            last_migration_ts: U64::new(meta.last_migration_ts),
+        }
+    }
+}
+
 impl Meta {
     pub fn new() -> Self {
         Self {
@@ -164,17 +239,8 @@ impl Default for Meta {
 
 impl Storable for Meta {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut buf = [0u8; META_SIZE];
-        buf[0..4].copy_from_slice(&self.magic);
-        buf[4..8].copy_from_slice(&self.layout_version.to_be_bytes());
-        buf[8..40].copy_from_slice(&self.schema_hash);
-        buf[40..44].copy_from_slice(&self.schema_version.to_be_bytes());
-        buf[44] = u8::from(self.needs_migration);
-        buf[45] = u8::from(self.active_tx_locs_v3);
-        buf[48..52].copy_from_slice(&self.last_migration_from.to_be_bytes());
-        buf[52..56].copy_from_slice(&self.last_migration_to.to_be_bytes());
-        buf[56..64].copy_from_slice(&self.last_migration_ts.to_be_bytes());
-        Cow::Owned(buf.to_vec())
+        let wire = MetaWire::new(self);
+        Cow::Owned(wire.as_bytes().to_vec())
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -205,24 +271,23 @@ impl Storable for Meta {
                 last_migration_ts: 0,
             };
         }
-        let schema_version = u32::from_be_bytes([data[40], data[41], data[42], data[43]]);
-        let needs_migration = data[44] != 0;
-        let active_tx_locs_v3 = data[45] != 0;
-        let last_migration_from = u32::from_be_bytes([data[48], data[49], data[50], data[51]]);
-        let last_migration_to = u32::from_be_bytes([data[52], data[53], data[54], data[55]]);
-        let last_migration_ts = u64::from_be_bytes([
-            data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
-        ]);
+        let wire = match MetaWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                record_corrupt(b"meta");
+                return Meta::new();
+            }
+        };
         Self {
-            magic,
-            layout_version,
-            schema_hash,
-            schema_version,
-            needs_migration,
-            active_tx_locs_v3,
-            last_migration_from,
-            last_migration_to,
-            last_migration_ts,
+            magic: wire.magic,
+            layout_version: wire.layout_version.get(),
+            schema_hash: wire.schema_hash,
+            schema_version: wire.schema_version.get(),
+            needs_migration: wire.needs_migration != 0,
+            active_tx_locs_v3: wire.active_tx_locs_v3 != 0,
+            last_migration_from: wire.last_migration_from.get(),
+            last_migration_to: wire.last_migration_to.get(),
+            last_migration_ts: wire.last_migration_ts.get(),
         }
     }
 

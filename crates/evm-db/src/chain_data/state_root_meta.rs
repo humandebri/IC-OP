@@ -38,7 +38,7 @@ impl Storable for StateRootMetaV1 {
         out[8..40].copy_from_slice(&self.state_root);
         match encode_guarded(
             b"state_root_meta_encode",
-            out.to_vec(),
+            Cow::Owned(out.to_vec()),
             STATE_ROOT_META_SIZE_U32,
         ) {
             Ok(value) => value,

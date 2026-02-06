@@ -2,7 +2,9 @@
 
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{LogConfigV1, LOG_CONFIG_FILTER_MAX};
-use evm_db::chain_data::constants::{MAX_RETURN_DATA, MAX_TXS_PER_BLOCK, MAX_TXS_PER_BLOCK_U32};
+use evm_db::chain_data::constants::{
+    MAX_LOGS_PER_TX, MAX_RETURN_DATA, MAX_TXS_PER_BLOCK, MAX_TXS_PER_BLOCK_U32,
+};
 use evm_db::blob_ptr::BlobPtr;
 use evm_db::chain_data::{
     BlockData, CallerKey, ChainStateV1, Head, OpsMetricsV1, PruneJournal, QueueMeta, ReceiptLike,
@@ -114,6 +116,56 @@ fn receipt_encode_rejects_oversized_return_data() {
         return_data: vec![1u8; MAX_RETURN_DATA + 1],
         contract_address: None,
         logs: Vec::new(),
+    };
+    let bytes = receipt.to_bytes().into_owned();
+    assert!(!bytes.is_empty());
+    let decoded = ReceiptLike::from_bytes(bytes.into());
+    assert_eq!(decoded.status, 0);
+}
+
+#[test]
+fn receipt_encode_rejects_invalid_status_without_trap() {
+    let receipt = ReceiptLike {
+        tx_id: TxId([0x44u8; 32]),
+        block_number: 2,
+        tx_index: 0,
+        status: 2,
+        gas_used: 21000,
+        effective_gas_price: 0,
+        l1_data_fee: 11,
+        operator_fee: 22,
+        total_fee: 33,
+        return_data_hash: [0x55u8; 32],
+        return_data: vec![1, 2, 3],
+        contract_address: None,
+        logs: Vec::new(),
+    };
+    let bytes = receipt.to_bytes().into_owned();
+    assert!(!bytes.is_empty());
+    let decoded = ReceiptLike::from_bytes(bytes.into());
+    assert_eq!(decoded.status, 0);
+}
+
+#[test]
+fn receipt_encode_rejects_oversized_logs_without_trap() {
+    let mut logs = Vec::with_capacity(MAX_LOGS_PER_TX + 1);
+    for _ in 0..(MAX_LOGS_PER_TX + 1) {
+        logs.push(test_log([0x11u8; 20], vec![[0x22u8; 32]], vec![0x33, 0x44]));
+    }
+    let receipt = ReceiptLike {
+        tx_id: TxId([0x44u8; 32]),
+        block_number: 2,
+        tx_index: 0,
+        status: 1,
+        gas_used: 21000,
+        effective_gas_price: 0,
+        l1_data_fee: 11,
+        operator_fee: 22,
+        total_fee: 33,
+        return_data_hash: [0x55u8; 32],
+        return_data: vec![1, 2, 3],
+        contract_address: None,
+        logs,
     };
     let bytes = receipt.to_bytes().into_owned();
     assert!(!bytes.is_empty());

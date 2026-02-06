@@ -59,6 +59,7 @@ impl TxLoc {
 
 impl Storable for TxLoc {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
+        // 固定長32bytesを保証してStableBTreeMapの境界チェックを通す。
         let encoded = match wincode::config::serialize(self, tx_loc_wincode_config()) {
             Ok(value) => value,
             Err(_) => {
@@ -66,7 +67,15 @@ impl Storable for TxLoc {
                 return encode_fallback_tx_loc();
             }
         };
-        match encode_guarded(b"tx_loc_encode", encoded, TX_LOC_SIZE_U32) {
+        let fixed = match encode_fixed_tx_loc(self, &encoded) {
+            Some(value) => value,
+            None => return encode_fallback_tx_loc(),
+        };
+        match encode_guarded(
+            b"tx_loc_encode",
+            Cow::Owned(fixed.to_vec()),
+            TX_LOC_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; TX_LOC_SIZE_U32 as usize]),
         }
@@ -80,7 +89,13 @@ impl Storable for TxLoc {
         let data = bytes.as_ref();
         match wincode::config::deserialize::<TxLoc, _>(data, tx_loc_wincode_config()) {
             Ok(value) => value,
-            _ => decode_legacy_tx_loc(data),
+            _ => {
+                if data.len() == TX_LOC_SIZE_U32 as usize {
+                    decode_fixed_tx_loc(data)
+                } else {
+                    decode_legacy_tx_loc(data)
+                }
+            }
         }
     }
 
@@ -100,10 +115,65 @@ fn tx_loc_wincode_config() -> impl wincode::config::Config {
 fn encode_fallback_tx_loc() -> Cow<'static, [u8]> {
     let fallback = TxLoc::queued(0);
     let encoded = wincode::config::serialize(&fallback, tx_loc_wincode_config())
-        .unwrap_or_else(|_| vec![0u8; TX_LOC_SIZE_U32 as usize]);
-    match encode_guarded(b"tx_loc_encode", encoded, TX_LOC_SIZE_U32) {
+        .unwrap_or_else(|_| Vec::new());
+    let fixed = encode_fixed_tx_loc(&fallback, &encoded)
+        .unwrap_or([0u8; TX_LOC_SIZE_U32 as usize]);
+    match encode_guarded(
+        b"tx_loc_encode",
+        Cow::Owned(fixed.to_vec()),
+        TX_LOC_SIZE_U32,
+    ) {
         Ok(value) => value,
         Err(_) => Cow::Owned(vec![0u8; TX_LOC_SIZE_U32 as usize]),
+    }
+}
+
+fn encode_fixed_tx_loc(loc: &TxLoc, encoded: &[u8]) -> Option<[u8; TX_LOC_SIZE_U32 as usize]> {
+    let mut out = [0u8; TX_LOC_SIZE_U32 as usize];
+    if encoded.len() <= TX_LOC_SIZE_U32 as usize && !encoded.is_empty() {
+        out[..encoded.len()].copy_from_slice(encoded);
+        return Some(out);
+    }
+    // 旧経路が失敗した場合の固定レイアウト。
+    out[0] = loc.kind as u8;
+    out[1..9].copy_from_slice(&loc.seq.to_be_bytes());
+    out[9..17].copy_from_slice(&loc.block_number.to_be_bytes());
+    out[17..21].copy_from_slice(&loc.tx_index.to_be_bytes());
+    out[21..23].copy_from_slice(&loc.drop_code.to_be_bytes());
+    Some(out)
+}
+
+fn decode_fixed_tx_loc(data: &[u8]) -> TxLoc {
+    if data.len() != TX_LOC_SIZE_U32 as usize {
+        mark_decode_failure(b"tx_loc", true);
+        return TxLoc::queued(0);
+    }
+    let kind = match data[0] {
+        0 => TxLocKind::Queued,
+        1 => TxLocKind::Included,
+        2 => TxLocKind::Dropped,
+        _ => {
+            mark_decode_failure(b"tx_loc", true);
+            TxLocKind::Queued
+        }
+    };
+    let mut buf8 = [0u8; 8];
+    let mut buf4 = [0u8; 4];
+    let mut buf2 = [0u8; 2];
+    buf8.copy_from_slice(&data[1..9]);
+    let seq = u64::from_be_bytes(buf8);
+    buf8.copy_from_slice(&data[9..17]);
+    let block_number = u64::from_be_bytes(buf8);
+    buf4.copy_from_slice(&data[17..21]);
+    let tx_index = u32::from_be_bytes(buf4);
+    buf2.copy_from_slice(&data[21..23]);
+    let drop_code = u16::from_be_bytes(buf2);
+    TxLoc {
+        kind,
+        seq,
+        block_number,
+        tx_index,
+        drop_code,
     }
 }
 

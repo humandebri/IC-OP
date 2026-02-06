@@ -4,6 +4,8 @@ use crate::chain_data::codec::{encode_guarded, mark_decode_failure};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub const DROPPED_RING_STATE_SIZE_U32: u32 = 16;
 
@@ -12,6 +14,24 @@ pub struct DroppedRingStateV1 {
     pub schema_version: u32,
     pub next_seq: u64,
     pub len: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct DroppedRingStateWire {
+    schema_version: U32,
+    next_seq: U64,
+    len: U32,
+}
+
+impl DroppedRingStateWire {
+    fn new(schema_version: u32, next_seq: u64, len: u32) -> Self {
+        Self {
+            schema_version: U32::new(schema_version),
+            next_seq: U64::new(next_seq),
+            len: U32::new(len),
+        }
+    }
 }
 
 impl DroppedRingStateV1 {
@@ -32,13 +52,10 @@ impl Default for DroppedRingStateV1 {
 
 impl Storable for DroppedRingStateV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 16];
-        out[0..4].copy_from_slice(&self.schema_version.to_be_bytes());
-        out[4..12].copy_from_slice(&self.next_seq.to_be_bytes());
-        out[12..16].copy_from_slice(&self.len.to_be_bytes());
+        let wire = DroppedRingStateWire::new(self.schema_version, self.next_seq, self.len);
         match encode_guarded(
             b"dropped_ring_state",
-            out.to_vec(),
+            Cow::Owned(wire.as_bytes().to_vec()),
             DROPPED_RING_STATE_SIZE_U32,
         ) {
             Ok(value) => value,
@@ -47,7 +64,8 @@ impl Storable for DroppedRingStateV1 {
     }
 
     fn into_bytes(self) -> Vec<u8> {
-        self.to_bytes().into_owned()
+        let wire = DroppedRingStateWire::new(self.schema_version, self.next_seq, self.len);
+        wire.as_bytes().to_vec()
     }
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
@@ -56,16 +74,17 @@ impl Storable for DroppedRingStateV1 {
             mark_decode_failure(b"dropped_ring_state", false);
             return DroppedRingStateV1::new();
         }
-        let mut schema = [0u8; 4];
-        schema.copy_from_slice(&data[0..4]);
-        let mut next_seq = [0u8; 8];
-        next_seq.copy_from_slice(&data[4..12]);
-        let mut len = [0u8; 4];
-        len.copy_from_slice(&data[12..16]);
+        let wire = match DroppedRingStateWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_decode_failure(b"dropped_ring_state", false);
+                return DroppedRingStateV1::new();
+            }
+        };
         Self {
-            schema_version: u32::from_be_bytes(schema),
-            next_seq: u64::from_be_bytes(next_seq),
-            len: u32::from_be_bytes(len),
+            schema_version: wire.schema_version.get(),
+            next_seq: wire.next_seq.get(),
+            len: wire.len.get(),
         }
     }
 

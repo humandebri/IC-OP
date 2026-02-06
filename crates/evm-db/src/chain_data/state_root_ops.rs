@@ -16,7 +16,7 @@ pub struct HashKey(pub [u8; 32]);
 
 impl Storable for HashKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        match encode_guarded(b"state_root_hash_key", self.0.to_vec(), 32) {
+        match encode_guarded(b"state_root_hash_key", Cow::Borrowed(&self.0), 32) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; 32]),
         }
@@ -64,7 +64,7 @@ impl Storable for NodeRecord {
         out.extend_from_slice(&self.rlp);
         match encode_guarded(
             b"state_root_node_record",
-            out,
+            Cow::Owned(out),
             STATE_ROOT_NODE_RECORD_MAX_U32,
         ) {
             Ok(value) => value,
@@ -125,7 +125,7 @@ impl Storable for GcStateV1 {
         out[16..24].copy_from_slice(&self.len.to_be_bytes());
         match encode_guarded(
             b"state_root_gc_state",
-            out.to_vec(),
+            Cow::Owned(out.to_vec()),
             STATE_ROOT_GC_STATE_SIZE_U32,
         ) {
             Ok(value) => value,
@@ -216,7 +216,7 @@ impl Storable for MigrationStateV1 {
         out[20..24].copy_from_slice(&self.schema_version_target.to_be_bytes());
         match encode_guarded(
             b"state_root_migration",
-            out.to_vec(),
+            Cow::Owned(out.to_vec()),
             STATE_ROOT_MIGRATION_SIZE_U32,
         ) {
             Ok(value) => value,
@@ -300,7 +300,7 @@ impl Storable for StateRootMetricsV1 {
         out[64] = self.migration_phase;
         match encode_guarded(
             b"state_root_metrics",
-            out.to_vec(),
+            Cow::Owned(out.to_vec()),
             STATE_ROOT_METRICS_SIZE_U32,
         ) {
             Ok(value) => value,
@@ -378,7 +378,7 @@ impl Storable for MismatchRecordV1 {
         out[144..152].copy_from_slice(&self.timestamp.to_be_bytes());
         match encode_guarded(
             b"state_root_mismatch_record",
-            out.to_vec(),
+            Cow::Owned(out.to_vec()),
             STATE_ROOT_MISMATCH_SIZE_U32,
         ) {
             Ok(value) => value,

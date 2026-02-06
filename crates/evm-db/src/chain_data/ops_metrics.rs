@@ -4,6 +4,8 @@ use crate::chain_data::codec::{encode_guarded, mark_decode_failure};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::U64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub const OPS_METRICS_SIZE_U32: u32 = 24;
 
@@ -12,6 +14,26 @@ pub struct OpsMetricsV1 {
     pub schema_version: u8,
     pub exec_halt_unknown_count: u64,
     pub last_exec_halt_unknown_warn_ts: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct OpsMetricsWire {
+    schema_version: u8,
+    _pad0: [u8; 7],
+    exec_halt_unknown_count: U64,
+    last_exec_halt_unknown_warn_ts: U64,
+}
+
+impl OpsMetricsWire {
+    fn new(metrics: &OpsMetricsV1) -> Self {
+        Self {
+            schema_version: metrics.schema_version,
+            _pad0: [0u8; 7],
+            exec_halt_unknown_count: U64::new(metrics.exec_halt_unknown_count),
+            last_exec_halt_unknown_warn_ts: U64::new(metrics.last_exec_halt_unknown_warn_ts),
+        }
+    }
 }
 
 impl OpsMetricsV1 {
@@ -32,11 +54,12 @@ impl Default for OpsMetricsV1 {
 
 impl Storable for OpsMetricsV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; OPS_METRICS_SIZE_U32 as usize];
-        out[0] = self.schema_version;
-        out[8..16].copy_from_slice(&self.exec_halt_unknown_count.to_be_bytes());
-        out[16..24].copy_from_slice(&self.last_exec_halt_unknown_warn_ts.to_be_bytes());
-        match encode_guarded(b"ops_metrics", out.to_vec(), OPS_METRICS_SIZE_U32) {
+        let wire = OpsMetricsWire::new(self);
+        match encode_guarded(
+            b"ops_metrics",
+            Cow::Owned(wire.as_bytes().to_vec()),
+            OPS_METRICS_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; OPS_METRICS_SIZE_U32 as usize]),
         }
@@ -52,14 +75,29 @@ impl Storable for OpsMetricsV1 {
             mark_decode_failure(b"ops_metrics", false);
             return Self::new();
         }
-        let mut unknown_count = [0u8; 8];
-        unknown_count.copy_from_slice(&data[8..16]);
-        let mut last_warn = [0u8; 8];
-        last_warn.copy_from_slice(&data[16..24]);
+        if data.len() == 40 {
+            let schema_version = data[0];
+            let mut count_bytes = [0u8; 8];
+            let mut ts_bytes = [0u8; 8];
+            count_bytes.copy_from_slice(&data[8..16]);
+            ts_bytes.copy_from_slice(&data[16..24]);
+            return Self {
+                schema_version,
+                exec_halt_unknown_count: u64::from_be_bytes(count_bytes),
+                last_exec_halt_unknown_warn_ts: u64::from_be_bytes(ts_bytes),
+            };
+        }
+        let wire = match OpsMetricsWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_decode_failure(b"ops_metrics", false);
+                return Self::new();
+            }
+        };
         Self {
-            schema_version: data[0],
-            exec_halt_unknown_count: u64::from_be_bytes(unknown_count),
-            last_exec_halt_unknown_warn_ts: u64::from_be_bytes(last_warn),
+            schema_version: wire.schema_version,
+            exec_halt_unknown_count: wire.exec_halt_unknown_count.get(),
+            last_exec_halt_unknown_warn_ts: wire.last_exec_halt_unknown_warn_ts.get(),
         }
     }
 

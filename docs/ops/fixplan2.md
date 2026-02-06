@@ -91,6 +91,7 @@
 ## 安全強化（2026-02-05, Guard/Migration/Log）
 
 - [x] `Storable::to_bytes` は `encode_guarded` 経由で `BOUND.max_size` 超過を即時検知（`storable.encode.bound_exceeded`）
+- [x] oversize テストは可変長 `Storable` を対象にし、固定長（`CallerKey`/`TxLoc` など）は対象外とする（oversize が発生しないため）
 - [x] decode失敗時ポリシーを型別に分離
   - [x] fail-closed: `tx`, `receipt`, `state_root_meta`, `tx_loc`, `block`, `tx_index`
   - [x] default継続: `metrics`, `prune_state`, `ops` など運用補助系

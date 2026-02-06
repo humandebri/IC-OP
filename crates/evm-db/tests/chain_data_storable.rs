@@ -2,10 +2,11 @@
 
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{LogConfigV1, LOG_CONFIG_FILTER_MAX};
-use evm_db::chain_data::constants::MAX_RETURN_DATA;
+use evm_db::chain_data::constants::{MAX_RETURN_DATA, MAX_TXS_PER_BLOCK, MAX_TXS_PER_BLOCK_U32};
+use evm_db::blob_ptr::BlobPtr;
 use evm_db::chain_data::{
-    BlockData, CallerKey, ChainStateV1, Head, OpsMetricsV1, QueueMeta, ReceiptLike, StoredTx,
-    StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
+    BlockData, CallerKey, ChainStateV1, Head, OpsMetricsV1, PruneJournal, QueueMeta, ReceiptLike,
+    StoredTx, StoredTxBytes, TxId, TxIndexEntry, TxKind, TxLoc,
 };
 use ic_stable_structures::Storable;
 
@@ -115,7 +116,9 @@ fn receipt_encode_rejects_oversized_return_data() {
         logs: Vec::new(),
     };
     let bytes = receipt.to_bytes().into_owned();
-    assert!(bytes.is_empty());
+    assert!(!bytes.is_empty());
+    let decoded = ReceiptLike::from_bytes(bytes.into());
+    assert_eq!(decoded.status, 0);
 }
 
 #[test]
@@ -127,6 +130,62 @@ fn log_config_encode_clamps_oversize_without_trap() {
     let decoded = LogConfigV1::from_bytes(bytes.into());
     assert!(!decoded.has_filter);
     assert_eq!(decoded.filter, "");
+}
+
+#[test]
+fn prune_journal_overflow_returns_fallback_bytes() {
+    let max_ptrs = 1u32.saturating_add(2u32.saturating_mul(MAX_TXS_PER_BLOCK_U32));
+    let mut ptrs = Vec::with_capacity((max_ptrs + 1) as usize);
+    for _ in 0..(max_ptrs + 1) {
+        ptrs.push(BlobPtr {
+            offset: 0,
+            len: 0,
+            class: 0,
+            gen: 0,
+        });
+    }
+    let journal = PruneJournal { ptrs };
+    let bytes = journal.to_bytes().into_owned();
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn block_data_encode_overflow_returns_fallback_bytes() {
+    let tx_ids = vec![TxId([0u8; 32]); MAX_TXS_PER_BLOCK + 1];
+    let block = BlockData::new(
+        0,
+        [0u8; 32],
+        [0u8; 32],
+        0,
+        tx_ids,
+        [0u8; 32],
+        [0u8; 32],
+    );
+    let bytes = block.to_bytes().into_owned();
+    assert!(!bytes.is_empty());
+    let decoded = BlockData::from_bytes(bytes.into());
+    assert!(decoded.tx_ids.is_empty());
+}
+
+#[test]
+fn stored_tx_encode_overflow_returns_fallback_bytes() {
+    let tx_id = TxId([0u8; 32]);
+    let oversized = vec![0u8; usize::from(u16::MAX) + 1];
+    let envelope = StoredTxBytes::new_with_fees(
+        tx_id,
+        TxKind::EthSigned,
+        vec![0u8; 1],
+        None,
+        Vec::new(),
+        oversized,
+        0,
+        0,
+        false,
+    );
+    let encoded = envelope.to_bytes().into_owned();
+    assert!(!encoded.is_empty());
+    let decoded = StoredTxBytes::from_bytes(encoded.into());
+    assert!(decoded.is_invalid());
 }
 
 #[test]

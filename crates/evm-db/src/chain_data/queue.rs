@@ -13,7 +13,9 @@ pub struct QueueMeta {
     pub tail: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
 #[repr(C)]
 struct QueueMetaWire {
     head: U64,

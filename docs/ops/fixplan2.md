@@ -145,3 +145,15 @@
   - 対象: `tx_store / tx_locs / ready_queue / pending_* / dropped_ring / metrics`  
   - **禁止**: `block / receipt / tx_index / trie_commit / head` の更新
 - `included_tx_ids.is_empty()` 分岐に入る前に **receipt/to_bytes/store が走っていない**ことをコード確認項目にする
+
+## 依存型不一致の是正（2026-02-07）
+
+- 事象: `cargo test -p evm-db -p ic-evm-core` は通るが、`cargo test --manifest-path crates/evm-rpc-e2e/Cargo.toml --no-run` で `StableBTreeMap<..., VMem>` の型不一致が発生。
+- 原因: `ic-evm-core` が `ic-stable-structures` を直接参照し、`evm-db` 経由の型と crate instance が分離される経路があった。
+- 対応:
+  - `crates/evm-core/Cargo.toml` から `ic-stable-structures` の直接依存を削除。
+  - map全件削除ロジックを `evm-db::stable_state::clear_map` に集約し、`evm-core` はそれを利用。
+  - `Storable` 参照を `evm_db::Storable`（再エクスポート）に統一。
+- 再発防止:
+  - `scripts/ci-local.sh` に `evm-rpc-e2e` マニフェスト経由 `--no-run` を追加。
+  - 同スクリプトで `cargo tree --manifest-path crates/evm-rpc-e2e/Cargo.toml -d -i ic-stable-structures` を監視し、重複解決を検知したら fail する。

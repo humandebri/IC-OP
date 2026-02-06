@@ -2,7 +2,7 @@
 
 use evm_db::chain_data::{BlockData, ReceiptLike, TxId, TxIndexEntry};
 use evm_db::stable_state::with_state;
-use ic_stable_structures::Storable;
+use evm_db::Storable;
 use std::borrow::Cow;
 
 const MAX_EXPORT_BYTES: u32 = 1_500_000;

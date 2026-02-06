@@ -45,6 +45,24 @@ fi
 
 cargo test -p evm-db -p ic-evm-core -p ic-evm-wrapper
 
+echo "[guard] evm-rpc-e2e manifest build check"
+cargo test --manifest-path crates/evm-rpc-e2e/Cargo.toml --no-run
+
+check_duplicate_dep() {
+  local dep_name="$1"
+  echo "[guard] ${dep_name} duplicate check"
+  local cargo_tree_dup
+  cargo_tree_dup=$(cargo tree --manifest-path crates/evm-rpc-e2e/Cargo.toml -d 2>&1 || true)
+  if grep -q "^${dep_name} v" <<<"$cargo_tree_dup"; then
+    echo "[guard] duplicate ${dep_name} detected"
+    echo "$cargo_tree_dup"
+    exit 1
+  fi
+}
+
+check_duplicate_dep "ic-stable-structures"
+check_duplicate_dep "ic-cdk-timers"
+
 echo "[guard] PR0 differential check"
 PR0_DIFF_LOCAL_FILE="${PR0_DIFF_LOCAL:-/tmp/pr0_snapshot_local.txt}"
 PR0_DIFF_REFERENCE_FILE="${PR0_DIFF_REFERENCE:-docs/ops/pr0_snapshot_reference.txt}"

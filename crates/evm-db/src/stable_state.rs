@@ -12,7 +12,7 @@ use crate::chain_data::{
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
 use crate::types::values::{AccountVal, CodeVal, U256Val};
-use ic_stable_structures::{StableBTreeMap, StableCell};
+use ic_stable_structures::{StableBTreeMap, StableCell, Storable};
 use std::cell::RefCell;
 
 pub type Accounts = StableBTreeMap<AccountKey, AccountVal, VMem>;
@@ -90,6 +90,19 @@ pub struct StableState {
 
 thread_local! {
     static STABLE_STATE: RefCell<Option<StableState>> = const { RefCell::new(None) };
+}
+
+/// どこで: stable_state共通ユーティリティ
+/// 何を: StableBTreeMapを全件削除する
+/// なぜ: 呼び出し側でic-stable-structures型を再定義せず、型系統を一本化するため
+pub fn clear_map<K: Copy + Ord + Storable, V: Storable>(map: &mut StableBTreeMap<K, V, VMem>) {
+    loop {
+        let key = match map.range(..).next() {
+            Some(entry) => *entry.key(),
+            None => break,
+        };
+        map.remove(&key);
+    }
 }
 
 pub fn init_stable_state() {

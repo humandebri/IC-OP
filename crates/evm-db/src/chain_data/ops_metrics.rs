@@ -16,7 +16,9 @@ pub struct OpsMetricsV1 {
     pub last_exec_halt_unknown_warn_ts: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
 #[repr(C)]
 struct OpsMetricsWire {
     schema_version: u8,

@@ -56,9 +56,7 @@ impl Storable for BlobPtr {
         let data = bytes.as_ref();
         if data.len() != 20 {
             record_corrupt(b"blob_ptr");
-            return Self {
-                0: [0u8; 20],
-            };
+            return Self([0u8; 20]);
         }
         let mut out = [0u8; 20];
         out.copy_from_slice(data);

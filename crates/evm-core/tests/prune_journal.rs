@@ -3,7 +3,7 @@
 use evm_core::chain;
 use evm_db::chain_data::{BlockData, ReceiptLike, TxId, TxIndexEntry, TxLoc};
 use evm_db::stable_state::{init_stable_state, with_state, with_state_mut};
-use ic_stable_structures::Storable;
+use evm_db::Storable;
 
 #[test]
 fn prune_journal_recovery_frees_quarantine() {

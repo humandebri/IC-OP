@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 use evm_core::chain;
 use evm_db::chain_data::{BlockData, Head, PrunePolicy};
 use evm_db::stable_state::{init_stable_state, with_state_mut};
-use ic_stable_structures::Storable;
+use evm_db::Storable;
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

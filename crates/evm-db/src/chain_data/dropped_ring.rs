@@ -16,7 +16,9 @@ pub struct DroppedRingStateV1 {
     pub len: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
 #[repr(C)]
 struct DroppedRingStateWire {
     schema_version: U32,

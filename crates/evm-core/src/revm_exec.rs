@@ -11,7 +11,7 @@ use evm_db::chain_data::constants::{
 use evm_db::chain_data::receipt::LogEntry;
 use evm_db::chain_data::{ReceiptLike, TxId, TxIndexEntry, TxKind};
 use evm_db::stable_state::with_state_mut;
-use ic_stable_structures::Storable;
+use evm_db::Storable;
 use revm::context::{Context, TxEnv};
 use revm::context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm::database_interface::DatabaseCommit;

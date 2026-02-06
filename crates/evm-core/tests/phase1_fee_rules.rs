@@ -16,8 +16,8 @@ fn min_priority_fee_rejects_low_tip() {
     });
 
     let tx_bytes = build_ic_tx_bytes(3_000_000_000, 1_000_000_000, 0);
-    let err = chain::submit_ic_tx(vec![0x11], vec![0x01], tx_bytes)
-        .expect_err("submit should fail");
+    let err =
+        chain::submit_ic_tx(vec![0x11], vec![0x01], tx_bytes).expect_err("submit should fail");
     assert_eq!(err, ChainError::InvalidFee);
 }
 
@@ -32,8 +32,7 @@ fn base_fee_rekey_drops_unaffordable_tx() {
     });
 
     let tx_bytes = build_ic_tx_bytes(2_000_000_000, 1_000_000_000, 0);
-    let tx_id = chain::submit_ic_tx(vec![0x22], vec![0x02], tx_bytes)
-        .expect("submit");
+    let tx_id = chain::submit_ic_tx(vec![0x22], vec![0x02], tx_bytes).expect("submit");
 
     with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
@@ -108,8 +107,22 @@ fn base_fee_matches_alloy_reference_vectors() {
         0,
         1,
     ];
-    let gas_used = [10_000_000u64, 9_000_000, 9_000_000, 0, 10_000_000, 10_000_000];
-    let gas_limit = [10_000_000u64, 10_000_000, 10_000_000, 2_000_000, 18_000_000, 18_000_000];
+    let gas_used = [
+        10_000_000u64,
+        9_000_000,
+        9_000_000,
+        0,
+        10_000_000,
+        10_000_000,
+    ];
+    let gas_limit = [
+        10_000_000u64,
+        10_000_000,
+        10_000_000,
+        2_000_000,
+        18_000_000,
+        18_000_000,
+    ];
     for idx in 0..base_fee.len() {
         let expected = calc_next_block_base_fee(
             gas_used[idx],

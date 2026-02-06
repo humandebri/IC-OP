@@ -1,11 +1,11 @@
 //! どこで: Stable構造体のStorable実装 / 何を: 固定長/可変長の境界指定 / なぜ: 安全なシリアライズのため
 
-use crate::decode::hash_to_array;
 use crate::corrupt_log::record_corrupt;
+use crate::decode::hash_to_array;
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
 use crate::types::values::{
-    AccountVal, CodeVal, U256Val, ACCOUNT_VAL_LEN, ACCOUNT_VAL_LEN_U32, MAX_CODE_SIZE_U32, U256_LEN,
-    U256_LEN_U32,
+    AccountVal, CodeVal, U256Val, ACCOUNT_VAL_LEN, ACCOUNT_VAL_LEN_U32, MAX_CODE_SIZE_U32,
+    U256_LEN, U256_LEN_U32,
 };
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;

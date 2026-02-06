@@ -116,5 +116,8 @@ fn migration_build_trie_progresses_with_small_steps() {
             progressed = true;
         }
     }
-    assert!(progressed, "migration cursor/phase must progress with max_steps=1");
+    assert!(
+        progressed,
+        "migration cursor/phase must progress with max_steps=1"
+    );
 }

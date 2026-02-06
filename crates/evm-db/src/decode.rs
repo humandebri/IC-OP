@@ -1,6 +1,6 @@
 //! どこで: Storable::from_bytes の安全デコード / 何を: 境界チェックとフォールバック / なぜ: 破損データでもTrapしないため
 
-use tiny_keccak::{Hasher, Keccak};
+use alloy_primitives::keccak256 as alloy_keccak256;
 
 pub fn read_exact<'a>(data: &'a [u8], offset: &mut usize, len: usize) -> Option<&'a [u8]> {
     if *offset > data.len() {
@@ -48,11 +48,10 @@ pub fn read_vec(data: &[u8], offset: &mut usize, len: usize) -> Option<Vec<u8>> 
 }
 
 pub fn hash_to_array<const N: usize>(label: &[u8], data: &[u8]) -> [u8; N] {
-    let mut hash = [0u8; 32];
-    let mut hasher = Keccak::v256();
-    hasher.update(label);
-    hasher.update(data);
-    hasher.finalize(&mut hash);
+    let mut payload = Vec::with_capacity(label.len() + data.len());
+    payload.extend_from_slice(label);
+    payload.extend_from_slice(data);
+    let hash = alloy_keccak256(&payload).0;
     let mut out = [0u8; N];
     let copy_len = if N < hash.len() { N } else { hash.len() };
     out[..copy_len].copy_from_slice(&hash[..copy_len]);

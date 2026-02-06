@@ -313,7 +313,10 @@ fn commit_state_root_noop_fast_path_uses_current_root() {
         .expect("noop fast-path commit");
         assert_eq!(root, baseline);
         let after = *state.state_root_metrics.get();
-        assert_eq!(after.state_root_verify_count, before.state_root_verify_count);
+        assert_eq!(
+            after.state_root_verify_count,
+            before.state_root_verify_count
+        );
         assert_eq!(
             after.state_root_verify_skipped_count,
             before.state_root_verify_skipped_count.saturating_add(1)

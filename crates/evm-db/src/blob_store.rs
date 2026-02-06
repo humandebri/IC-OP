@@ -1,9 +1,9 @@
 //! どこで: stableのBlob格納 / 何を: arena + alloc_table + free_list / なぜ: 再利用可能な基盤を先に固定するため
 
 use crate::blob_ptr::BlobPtr;
-use crate::size_class::{smallest_class, SizeClassError};
-use crate::memory::VMem;
 use crate::corrupt_log::record_corrupt;
+use crate::memory::VMem;
+use crate::size_class::{smallest_class, SizeClassError};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{Memory, StableBTreeMap, StableCell, Storable};
 use std::borrow::Cow;
@@ -61,7 +61,10 @@ impl Storable for AllocKey {
         let data = bytes.as_ref();
         if data.len() != 12 {
             record_corrupt(b"alloc_key");
-            return Self { class: 0, offset: 0 };
+            return Self {
+                class: 0,
+                offset: 0,
+            };
         }
         let mut class = [0u8; 4];
         class.copy_from_slice(&data[0..4]);
@@ -170,7 +173,10 @@ impl BlobStore {
         let len_u32 = u32::try_from(len).map_err(|_| BlobError::LengthTooLarge)?;
         let offset = match self.pop_free(class) {
             Some(value) => {
-                let key = AllocKey { class, offset: value };
+                let key = AllocKey {
+                    class,
+                    offset: value,
+                };
                 let mut entry = self
                     .alloc_table
                     .get(&key)
@@ -267,7 +273,10 @@ impl BlobStore {
             class: ptr.class,
             offset: ptr.offset,
         };
-        let mut entry = self.alloc_table.get(&key).ok_or(BlobError::MissingAllocEntry)?;
+        let mut entry = self
+            .alloc_table
+            .get(&key)
+            .ok_or(BlobError::MissingAllocEntry)?;
         if entry.gen != ptr.gen {
             return Err(BlobError::InvalidPointer);
         }
@@ -287,7 +296,10 @@ impl BlobStore {
             class: ptr.class,
             offset: ptr.offset,
         };
-        let mut entry = self.alloc_table.get(&key).ok_or(BlobError::MissingAllocEntry)?;
+        let mut entry = self
+            .alloc_table
+            .get(&key)
+            .ok_or(BlobError::MissingAllocEntry)?;
         if entry.gen != ptr.gen {
             return Err(BlobError::InvalidPointer);
         }
@@ -345,9 +357,7 @@ fn pages_required(end_offset: u64) -> Result<u64, BlobError> {
     if end_offset == 0 {
         return Ok(0);
     }
-    let add = WASM_PAGE_SIZE
-        .checked_sub(1)
-        .ok_or(BlobError::Overflow)?;
+    let add = WASM_PAGE_SIZE.checked_sub(1).ok_or(BlobError::Overflow)?;
     let sum = end_offset.checked_add(add).ok_or(BlobError::Overflow)?;
     Ok(sum / WASM_PAGE_SIZE)
 }

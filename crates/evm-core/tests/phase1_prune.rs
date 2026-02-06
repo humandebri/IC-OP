@@ -100,7 +100,15 @@ fn make_block(number: u64, tx_id: TxId) -> BlockData {
     let block_hash = [number_u8; 32];
     let tx_list_hash = [number_u8; 32];
     let state_root = [0u8; 32];
-    BlockData::new(number, parent_hash, block_hash, number, vec![tx_id], tx_list_hash, state_root)
+    BlockData::new(
+        number,
+        parent_hash,
+        block_hash,
+        number,
+        vec![tx_id],
+        tx_list_hash,
+        state_root,
+    )
 }
 
 fn fake_receipt(tx_id: TxId, block_number: u64) -> ReceiptLike {
@@ -123,20 +131,14 @@ fn fake_receipt(tx_id: TxId, block_number: u64) -> ReceiptLike {
 
 fn insert_block(state: &mut evm_db::stable_state::StableState, number: u64, block: &BlockData) {
     let bytes = block.to_bytes().into_owned();
-    let ptr = state
-        .blob_store
-        .store_bytes(&bytes)
-        .expect("store block");
+    let ptr = state.blob_store.store_bytes(&bytes).expect("store block");
     state.blocks.insert(number, ptr);
 }
 
 fn insert_receipt(state: &mut evm_db::stable_state::StableState, tx_id: TxId, block_number: u64) {
     let receipt = fake_receipt(tx_id, block_number);
     let bytes = receipt.to_bytes().into_owned();
-    let ptr = state
-        .blob_store
-        .store_bytes(&bytes)
-        .expect("store receipt");
+    let ptr = state.blob_store.store_bytes(&bytes).expect("store receipt");
     state.receipts.insert(tx_id, ptr);
 }
 

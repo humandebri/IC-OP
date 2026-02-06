@@ -88,11 +88,7 @@ fn receipt_roundtrip() {
         return_data_hash: [0x55u8; 32],
         return_data: vec![1, 2, 3],
         contract_address: None,
-        logs: vec![test_log(
-            [0x11u8; 20],
-            vec![[0x22u8; 32]],
-            vec![0x33, 0x44],
-        )],
+        logs: vec![test_log([0x11u8; 20], vec![[0x22u8; 32]], vec![0x33, 0x44])],
     };
     let bytes = receipt.to_bytes();
     let decoded = ReceiptLike::from_bytes(bytes);
@@ -241,6 +237,16 @@ fn tx_loc_roundtrip() {
     let bytes = loc.to_bytes();
     let decoded = TxLoc::from_bytes(bytes);
     assert_eq!(loc, decoded);
+}
+
+#[test]
+fn tx_loc_decodes_legacy_bytes() {
+    let mut legacy = [0u8; 24];
+    legacy[0] = 1;
+    legacy[9..17].copy_from_slice(&7u64.to_be_bytes());
+    legacy[17..21].copy_from_slice(&2u32.to_be_bytes());
+    let decoded = TxLoc::from_bytes(std::borrow::Cow::Owned(legacy.to_vec()));
+    assert_eq!(decoded, TxLoc::included(7, 2));
 }
 
 #[test]

@@ -15,7 +15,11 @@ fn need_prune_ignores_enabled_flag() {
     let _guard = test_lock().lock().unwrap_or_else(|err| err.into_inner());
     init_stable_state();
     with_state_mut(|state| {
-        state.head.set(Head { number: 10, block_hash: [0u8; 32], timestamp: 86_401 });
+        state.head.set(Head {
+            number: 10,
+            block_hash: [0u8; 32],
+            timestamp: 86_401,
+        });
         let mut config = *state.prune_config.get();
         config.pruning_enabled = false;
         config.retain_days = 1;
@@ -23,7 +27,10 @@ fn need_prune_ignores_enabled_flag() {
         state.prune_config.set(config);
     });
     let status = chain::get_prune_status();
-    assert!(status.need_prune, "need_prune should be true even when disabled");
+    assert!(
+        status.need_prune,
+        "need_prune should be true even when disabled"
+    );
 }
 
 #[test]
@@ -35,7 +42,11 @@ fn retain_blocks_keeps_exact_count() {
             let block = make_block(number);
             insert_block(state, number, &block);
         }
-        state.head.set(Head { number: 10, block_hash: [0u8; 32], timestamp: 86_401 });
+        state.head.set(Head {
+            number: 10,
+            block_hash: [0u8; 32],
+            timestamp: 86_401,
+        });
         let mut config = *state.prune_config.get();
         config.pruning_enabled = true;
         config.set_policy(PrunePolicy {
@@ -61,7 +72,15 @@ fn make_block(number: u64) -> BlockData {
     let block_hash = [number_u8; 32];
     let tx_list_hash = [number_u8; 32];
     let state_root = [0u8; 32];
-    BlockData::new(number, parent_hash, block_hash, number, Vec::new(), tx_list_hash, state_root)
+    BlockData::new(
+        number,
+        parent_hash,
+        block_hash,
+        number,
+        Vec::new(),
+        tx_list_hash,
+        state_root,
+    )
 }
 
 fn insert_block(state: &mut evm_db::stable_state::StableState, number: u64, block: &BlockData) {

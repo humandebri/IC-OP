@@ -40,7 +40,7 @@ pub const DEFAULT_MIN_PRIORITY_FEE: u64 = 1_000_000_000;
 pub const DEFAULT_BLOCK_GAS_LIMIT: u64 = 15_000_000;
 
 // TxLocの固定長
-pub const TX_LOC_SIZE_U32: u32 = 24;
+pub const TX_LOC_SIZE_U32: u32 = 32;
 
 // TxLoc の drop_code（最低限の分類）
 pub const DROP_CODE_DECODE: u16 = 1;

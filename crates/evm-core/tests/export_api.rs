@@ -189,7 +189,15 @@ fn make_block(number: u64, tx_id: TxId) -> BlockData {
     let block_hash = [number_u8; 32];
     let tx_list_hash = [number_u8; 32];
     let state_root = [0u8; 32];
-    BlockData::new(number, parent_hash, block_hash, number, vec![tx_id], tx_list_hash, state_root)
+    BlockData::new(
+        number,
+        parent_hash,
+        block_hash,
+        number,
+        vec![tx_id],
+        tx_list_hash,
+        state_root,
+    )
 }
 
 fn insert_block(state: &mut evm_db::stable_state::StableState, number: u64, block: &BlockData) {
@@ -211,7 +219,10 @@ fn insert_tx_index(state: &mut evm_db::stable_state::StableState, tx_id: TxId, b
         tx_index: 0,
     };
     let bytes = entry.to_bytes().into_owned();
-    let ptr = state.blob_store.store_bytes(&bytes).expect("store tx_index");
+    let ptr = state
+        .blob_store
+        .store_bytes(&bytes)
+        .expect("store tx_index");
     state.tx_index.insert(tx_id, ptr);
 }
 

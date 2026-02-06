@@ -98,7 +98,15 @@ fn make_block(number: u64) -> BlockData {
     let block_hash = [number_u8; 32];
     let tx_list_hash = [number_u8; 32];
     let state_root = [0u8; 32];
-    BlockData::new(number, parent_hash, block_hash, number, Vec::<TxId>::new(), tx_list_hash, state_root)
+    BlockData::new(
+        number,
+        parent_hash,
+        block_hash,
+        number,
+        Vec::<TxId>::new(),
+        tx_list_hash,
+        state_root,
+    )
 }
 
 fn insert_block(state: &mut evm_db::stable_state::StableState, number: u64, block: &BlockData) {

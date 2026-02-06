@@ -2,7 +2,9 @@
 
 use evm_core::chain::{self, ChainError};
 use evm_db::chain_data::constants::{DROP_CODE_DECODE, DROP_CODE_INVALID_FEE};
-use evm_db::chain_data::{ReadyKey, SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind};
+use evm_db::chain_data::{
+    ReadyKey, SenderKey, SenderNonceKey, StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind,
+};
 use evm_db::stable_state::{init_stable_state, with_state_mut};
 
 #[test]

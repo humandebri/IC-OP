@@ -4,6 +4,7 @@ use crate::memory::{get_memory, AppMemoryId, VMem};
 use ic_stable_structures::reader::Reader;
 use ic_stable_structures::writer::Writer;
 use ic_stable_structures::Memory;
+use tracing::warn;
 
 const UPGRADE_STATE_VERSION: u32 = 1;
 
@@ -18,13 +19,13 @@ pub fn post_upgrade() {
     let memory: VMem = get_memory(AppMemoryId::Upgrades);
     if let Some(version) = read_version(&memory) {
         if version != UPGRADE_STATE_VERSION {
-            ic_cdk::api::debug_print(format!(
+            warn!(
                 "upgrade: version mismatch detected (found {}, expected {})",
                 version, UPGRADE_STATE_VERSION
-            ));
+            );
         }
     } else {
-        ic_cdk::api::debug_print("upgrade: no persisted state version".to_string());
+        warn!("upgrade: no persisted state version");
     }
 }
 

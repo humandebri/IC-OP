@@ -4,10 +4,10 @@ use crate::blob_ptr::BlobPtr;
 use crate::blob_store::BlobStore;
 use crate::chain_data::constants::CHAIN_ID;
 use crate::chain_data::{
-    CallerKey, ChainStateV1, DroppedRingStateV1, GcStateV1, HashKey, Head, MetricsStateV1,
-    MigrationStateV1, MismatchRecordV1, NodeRecord, OpsConfigV1, OpsMetricsV1, OpsStateV1,
-    PruneConfigV1, PruneJournal, PruneStateV1, QueueMeta, ReadyKey, SenderKey, SenderNonceKey,
-    StateRootMetaV1, StateRootMetricsV1, StoredTxBytes, TxId,
+    CallerKey, ChainStateV1, DroppedRingStateV1, GcStateV1, HashKey, Head, LogConfigV1,
+    MetricsStateV1, MigrationStateV1, MismatchRecordV1, NodeRecord, OpsConfigV1, OpsMetricsV1,
+    OpsStateV1, PruneConfigV1, PruneJournal, PruneStateV1, QueueMeta, ReadyKey, SenderKey,
+    SenderNonceKey, StateRootMetaV1, StateRootMetricsV1, StoredTxBytes, TxId,
 };
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
@@ -62,9 +62,11 @@ pub struct StableState {
     pub ops_config: StableCell<OpsConfigV1, VMem>,
     pub ops_state: StableCell<OpsStateV1, VMem>,
     pub ops_metrics: StableCell<OpsMetricsV1, VMem>,
+    pub log_config: StableCell<LogConfigV1, VMem>,
     pub prune_journal: PruneJournalMap,
     pub caller_nonces: CallerNonces,
     pub tx_locs: TxLocs,
+    pub tx_locs_v3: TxLocs,
     pub ready_queue: ReadyQueue,
     pub ready_key_by_tx_id: ReadyKeyByTxId,
     pub pending_by_sender_nonce: PendingBySenderNonce,
@@ -125,9 +127,11 @@ pub fn init_stable_state() {
     let ops_config = StableCell::init(get_memory(AppMemoryId::OpsConfig), OpsConfigV1::new());
     let ops_state = StableCell::init(get_memory(AppMemoryId::OpsState), OpsStateV1::new());
     let ops_metrics = StableCell::init(get_memory(AppMemoryId::OpsMetrics), OpsMetricsV1::new());
+    let log_config = StableCell::init(get_memory(AppMemoryId::Reserved37), LogConfigV1::new());
     let prune_journal = StableBTreeMap::init(get_memory(AppMemoryId::PruneJournal));
     let caller_nonces = StableBTreeMap::init(get_memory(AppMemoryId::CallerNonces));
     let tx_locs = StableBTreeMap::init(get_memory(AppMemoryId::TxLocs));
+    let tx_locs_v3 = StableBTreeMap::init(get_memory(AppMemoryId::Reserved40));
     let ready_queue = StableBTreeMap::init(get_memory(AppMemoryId::ReadyQueue));
     let ready_key_by_tx_id = StableBTreeMap::init(get_memory(AppMemoryId::ReadyKeyByTxId));
     let pending_by_sender_nonce =
@@ -161,10 +165,8 @@ pub fn init_stable_state() {
     let state_root_account_leaf_hash =
         StableBTreeMap::init(get_memory(AppMemoryId::StateRootAccountLeafHash));
     let state_root_gc_queue = StableBTreeMap::init(get_memory(AppMemoryId::StateRootGcQueue));
-    let state_root_gc_state = StableCell::init(
-        get_memory(AppMemoryId::StateRootGcState),
-        GcStateV1::new(),
-    );
+    let state_root_gc_state =
+        StableCell::init(get_memory(AppMemoryId::StateRootGcState), GcStateV1::new());
     STABLE_STATE.with(|s| {
         *s.borrow_mut() = Some(StableState {
             accounts,
@@ -186,9 +188,11 @@ pub fn init_stable_state() {
             ops_config,
             ops_state,
             ops_metrics,
+            log_config,
             prune_journal,
             caller_nonces,
             tx_locs,
+            tx_locs_v3,
             ready_queue,
             ready_key_by_tx_id,
             pending_by_sender_nonce,

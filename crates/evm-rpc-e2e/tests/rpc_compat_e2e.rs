@@ -135,6 +135,7 @@ struct PruneResultView {
 }
 
 type PruneBlocksResult = Result<PruneResultView, ProduceBlockError>;
+type ManageWriteResult = Result<(), String>;
 
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 struct LogView {
@@ -153,8 +154,12 @@ fn wasm_path() -> PathBuf {
         .join("ic_evm_wrapper.wasm")
 }
 
+fn test_caller() -> Principal {
+    Principal::self_authenticating(b"rpc-e2e-test-caller")
+}
+
 fn install_canister(pic: &PocketIc) -> Principal {
-    let caller = Principal::anonymous();
+    let caller = test_caller();
     let init = Some(InitArgs {
         genesis_balances: vec![GenesisBalanceView {
             address: hash::caller_evm_from_principal(caller.as_slice()).to_vec(),
@@ -162,7 +167,10 @@ fn install_canister(pic: &PocketIc) -> Principal {
         }],
     });
     let init_arg = Encode!(&init).expect("encode init args");
-    install_canister_with_arg(pic, init_arg)
+    let canister_id = install_canister_with_arg(pic, init_arg);
+    pic.set_controllers(canister_id, Some(Principal::anonymous()), vec![caller])
+        .unwrap_or_else(|err| panic!("set_controllers error: {err}"));
+    canister_id
 }
 
 fn install_canister_with_arg(pic: &PocketIc, init_arg: Vec<u8>) -> Principal {
@@ -210,7 +218,17 @@ fn call_query(pic: &PocketIc, canister_id: Principal, method: &str, arg: Vec<u8>
 }
 
 fn call_update(pic: &PocketIc, canister_id: Principal, method: &str, arg: Vec<u8>) -> Vec<u8> {
-    pic.update_call(canister_id, Principal::anonymous(), method, arg)
+    call_update_as(pic, canister_id, test_caller(), method, arg)
+}
+
+fn call_update_as(
+    pic: &PocketIc,
+    canister_id: Principal,
+    caller: Principal,
+    method: &str,
+    arg: Vec<u8>,
+) -> Vec<u8> {
+    pic.update_call(canister_id, caller, method, arg)
         .unwrap_or_else(|err| panic!("update error: {err}"))
 }
 
@@ -341,6 +359,55 @@ fn prune_blocks_requires_controller() {
             );
         }
         Err(other) => panic!("unexpected prune error: {other:?}"),
+    }
+}
+
+#[test]
+fn unprivileged_produce_block_is_rejected() {
+    let pic = PocketIc::new();
+    let canister_id = install_canister(&pic);
+    let unprivileged = Principal::self_authenticating(b"unprivileged-producer");
+    let out = call_update_as(
+        &pic,
+        canister_id,
+        unprivileged,
+        "produce_block",
+        Encode!(&1u32).expect("encode produce"),
+    );
+    let result: ProduceBlockResult = Decode!(&out, ProduceBlockResult).expect("decode produce");
+    match result {
+        Ok(_) => panic!("unprivileged produce_block must be rejected"),
+        Err(ProduceBlockError::Internal(message)) => {
+            assert!(
+                message.contains("auth.producer_required"),
+                "unexpected message: {message}"
+            );
+        }
+        Err(other) => panic!("unexpected produce error: {other:?}"),
+    }
+}
+
+#[test]
+fn unprivileged_set_auto_mine_is_rejected() {
+    let pic = PocketIc::new();
+    let canister_id = install_canister(&pic);
+    let unprivileged = Principal::self_authenticating(b"unprivileged-manager");
+    let out = call_update_as(
+        &pic,
+        canister_id,
+        unprivileged,
+        "set_auto_mine",
+        Encode!(&true).expect("encode set_auto_mine"),
+    );
+    let result: ManageWriteResult = Decode!(&out, ManageWriteResult).expect("decode set_auto_mine");
+    match result {
+        Ok(()) => panic!("unprivileged set_auto_mine must be rejected"),
+        Err(message) => {
+            assert!(
+                message.contains("auth.controller_required"),
+                "unexpected message: {message}"
+            );
+        }
     }
 }
 

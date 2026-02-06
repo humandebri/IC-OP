@@ -1,6 +1,6 @@
 //! どこで: 開発用CLI / 何を: principal文字列 -> caller_evm / なぜ: canister外で導出するため
 
-use tiny_keccak::{Hasher, Keccak};
+use alloy_primitives::keccak256;
 
 const DOMAIN_SEP: &[u8] = b"ic-evm:caller_evm:v1";
 
@@ -16,11 +16,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut out = [0u8; 32];
-    let mut hasher = Keccak::v256();
-    hasher.update(DOMAIN_SEP);
-    hasher.update(&bytes);
-    hasher.finalize(&mut out);
+    let mut payload = Vec::with_capacity(DOMAIN_SEP.len() + bytes.len());
+    payload.extend_from_slice(DOMAIN_SEP);
+    payload.extend_from_slice(&bytes);
+    let out = keccak256(&payload).0;
     let addr = &out[12..32];
     println!("{}", hex_encode(addr));
 }

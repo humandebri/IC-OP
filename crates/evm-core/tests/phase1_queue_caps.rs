@@ -2,7 +2,7 @@
 
 use evm_core::chain::{self, ChainError};
 use evm_db::chain_data::constants::{DROP_CODE_REPLACED, MAX_PENDING_GLOBAL};
-use evm_db::chain_data::{SenderNonceKey, TxLocKind, TxId};
+use evm_db::chain_data::{SenderNonceKey, TxId, TxLocKind};
 use evm_db::stable_state::{init_stable_state, with_state_mut};
 
 #[test]
@@ -23,8 +23,12 @@ fn submit_ic_tx_rejects_when_global_pending_cap_is_reached() {
         }
     });
 
-    let err = chain::submit_ic_tx(vec![0x01], vec![0x02], build_ic_tx_bytes(0, 2_000_000_000, 1_000_000_000))
-        .expect_err("global cap should reject submit");
+    let err = chain::submit_ic_tx(
+        vec![0x01],
+        vec![0x02],
+        build_ic_tx_bytes(0, 2_000_000_000, 1_000_000_000),
+    )
+    .expect_err("global cap should reject submit");
     assert_eq!(err, ChainError::QueueFull);
 }
 
@@ -34,7 +38,8 @@ fn replacement_is_allowed_even_when_global_pending_cap_is_reached() {
     let caller = vec![0x42];
     let canister = vec![0x77];
     let first_tx = build_ic_tx_bytes(0, 2_000_000_000, 1_000_000_000);
-    let first_tx_id = chain::submit_ic_tx(caller.clone(), canister.clone(), first_tx).expect("first submit");
+    let first_tx_id =
+        chain::submit_ic_tx(caller.clone(), canister.clone(), first_tx).expect("first submit");
 
     with_state_mut(|state| {
         // Keep the original sender entry, then fill up to the global cap with distinct senders.
@@ -53,8 +58,8 @@ fn replacement_is_allowed_even_when_global_pending_cap_is_reached() {
     });
 
     let replacement_tx = build_ic_tx_bytes(0, 3_000_000_000, 2_000_000_000);
-    let replacement_tx_id =
-        chain::submit_ic_tx(caller, canister, replacement_tx).expect("replacement should be accepted");
+    let replacement_tx_id = chain::submit_ic_tx(caller, canister, replacement_tx)
+        .expect("replacement should be accepted");
     assert_ne!(replacement_tx_id, first_tx_id);
     let old_loc = chain::get_tx_loc(&first_tx_id).expect("old tx loc");
     assert_eq!(old_loc.kind, TxLocKind::Dropped);

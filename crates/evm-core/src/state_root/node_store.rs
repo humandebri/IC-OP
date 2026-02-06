@@ -1,8 +1,8 @@
 //! どこで: state root永続化層 / 何を: journalをstableに適用 / なぜ: 副作用境界を一本化するため
 
+use alloy_trie::EMPTY_ROOT_HASH;
 use evm_db::chain_data::{HashKey, NodeRecord};
 use evm_db::stable_state::StableState;
-use alloy_trie::EMPTY_ROOT_HASH;
 use std::collections::BTreeMap;
 
 pub type NodeDeltaCounts = BTreeMap<HashKey, i64>;
@@ -32,7 +32,9 @@ pub fn apply_journal(state: &mut StableState, mut journal: JournalUpdate) {
                 continue;
             }
         }
-        state.state_root_node_db.insert(hash, NodeRecord::new(0, rlp));
+        state
+            .state_root_node_db
+            .insert(hash, NodeRecord::new(0, rlp));
     }
 
     for (hash, delta) in journal.node_delta_counts {

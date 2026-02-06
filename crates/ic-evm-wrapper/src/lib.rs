@@ -6,18 +6,26 @@ use evm_db::chain_data::constants::CHAIN_ID;
 use evm_db::chain_data::constants::{MAX_QUEUE_SNAPSHOT_LIMIT, MAX_RETURN_DATA, MAX_TX_SIZE};
 use evm_db::chain_data::{
     BlockData, CallerKey, MigrationPhase, OpsConfigV1, OpsMode, ReceiptLike, StoredTx,
-    StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind,
+    StoredTxBytes, TxId, TxKind, TxLoc, TxLocKind, LOG_CONFIG_FILTER_MAX,
 };
 use evm_db::meta::{
     current_schema_version, ensure_meta_initialized, get_meta, mark_migration_applied,
+    schema_migration_state, set_needs_migration, set_schema_migration_state, set_tx_locs_v3_active,
+    SchemaMigrationPhase, SchemaMigrationState,
 };
 use evm_db::stable_state::{init_stable_state, with_state};
 use evm_db::upgrade;
 use ic_cdk::api::{
-    accept_message, canister_cycle_balance, debug_print, is_controller, msg_caller,
-    msg_method_name, time,
+    accept_message, canister_cycle_balance, env_var_name_exists, env_var_value, is_controller,
+    msg_caller, msg_method_name, time,
 };
 use serde::Deserialize;
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use tracing::{error, warn};
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::EnvFilter;
 
 #[cfg(target_arch = "wasm32")]
 getrandom::register_custom_getrandom!(always_fail_getrandom);
@@ -93,6 +101,9 @@ pub struct OpsStatusView {
     pub safe_stop_latched: bool,
     pub needs_migration: bool,
     pub schema_version: u32,
+    pub log_filter_override: Option<String>,
+    pub log_truncated_count: u64,
+    pub critical_corrupt: bool,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -358,8 +369,9 @@ impl InitArgs {
 
 #[ic_cdk::init]
 fn init(args: Option<InitArgs>) {
-    let _ = ensure_meta_initialized();
     init_stable_state();
+    let _ = ensure_meta_initialized();
+    init_tracing();
     let args = args.unwrap_or_else(|| {
         ic_cdk::trap("InitArgsRequired: InitArgs is required; pass (opt record {...})")
     });
@@ -380,8 +392,9 @@ fn init(args: Option<InitArgs>) {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     upgrade::post_upgrade();
-    let _ = ensure_meta_initialized();
     init_stable_state();
+    let _ = ensure_meta_initialized();
+    init_tracing();
     apply_post_upgrade_migrations();
     observe_cycles();
     schedule_cycle_observer();
@@ -397,6 +410,9 @@ fn pre_upgrade() {
 fn inspect_message() {
     let method = msg_method_name();
     if !inspect_method_allowed(method.as_str()) {
+        return;
+    }
+    if reject_anonymous_update().is_some() {
         return;
     }
     let payload_len = inspect_payload_len();
@@ -419,6 +435,7 @@ fn inspect_method_allowed(method: &str) -> bool {
             | "set_prune_policy"
             | "set_pruning_enabled"
             | "set_ops_config"
+            | "set_log_filter"
             | "set_miner_allowlist"
             | "prune_blocks"
             | "produce_block"
@@ -468,7 +485,7 @@ fn map_execute_chain_result(
             return Err(ExecuteTxError::Rejected(code.to_string()));
         }
         Err(err) => {
-            debug_print(format!("execute_tx err: {:?}", err));
+            error!(error = ?err, "execute_tx failed");
             return Err(ExecuteTxError::Internal("internal error".to_string()));
         }
     };
@@ -484,6 +501,9 @@ fn map_execute_chain_result(
 
 #[ic_cdk::update]
 fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(SubmitTxError::Rejected(reason));
+    }
     if let Some(reason) = reject_write_reason() {
         return Err(SubmitTxError::Rejected(reason));
     }
@@ -522,7 +542,7 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
             return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
-            debug_print(format!("submit_eth_tx err: {:?}", err));
+            error!(error = ?err, "submit_eth_tx failed");
             return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
@@ -532,6 +552,9 @@ fn submit_eth_tx(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
 
 #[ic_cdk::update]
 fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(SubmitTxError::Rejected(reason));
+    }
     if let Some(reason) = reject_write_reason() {
         return Err(SubmitTxError::Rejected(reason));
     }
@@ -576,7 +599,7 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
             return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
-            debug_print(format!("submit_ic_tx err: {:?}", err));
+            error!(error = ?err, "submit_ic_tx failed");
             return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
@@ -587,6 +610,9 @@ fn submit_ic_tx(tx_bytes: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
 #[cfg(feature = "dev-faucet")]
 #[ic_cdk::update]
 fn dev_mint(address: Vec<u8>, amount: u128) {
+    if let Some(reason) = reject_anonymous_update() {
+        ic_cdk::trap(&reason);
+    }
     if reject_write_reason().is_some() {
         return;
     }
@@ -604,6 +630,9 @@ fn dev_mint(address: Vec<u8>, amount: u128) {
 
 #[ic_cdk::update]
 fn produce_block(max_txs: u32) -> Result<ProduceBlockStatus, ProduceBlockError> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(ProduceBlockError::Internal(reason));
+    }
     if let Err(reason) = require_producer_write() {
         return Err(ProduceBlockError::Internal(reason));
     }
@@ -656,7 +685,7 @@ fn produce_block(max_txs: u32) -> Result<ProduceBlockStatus, ProduceBlockError> 
             "max_txs must be > 0".to_string(),
         )),
         Err(err) => {
-            debug_print(format!("produce_block err: {:?}", err));
+            error!(error = ?err, "produce_block failed");
             Err(ProduceBlockError::Internal("internal error".to_string()))
         }
     }
@@ -766,6 +795,9 @@ fn rpc_eth_block_number() -> u64 {
 
 #[ic_cdk::update]
 fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
     require_manage_write()?;
     let core_policy = evm_db::chain_data::PrunePolicy {
         target_bytes: policy.target_bytes,
@@ -783,6 +815,9 @@ fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
 
 #[ic_cdk::update]
 fn set_pruning_enabled(enabled: bool) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
     require_manage_write()?;
     chain::set_pruning_enabled(enabled).map_err(|_| "set_pruning_enabled failed".to_string())?;
     schedule_prune();
@@ -846,6 +881,14 @@ fn rpc_eth_get_transaction_receipt(tx_hash: Vec<u8>) -> Option<EthReceiptView> {
 
 #[ic_cdk::update]
 fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxError> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(SubmitTxError::Rejected(reason));
+    }
+    if critical_corrupt_state() {
+        return Err(SubmitTxError::Rejected(
+            "rpc.state_unavailable.corrupt_or_migrating".to_string(),
+        ));
+    }
     if let Some(reason) = reject_write_reason() {
         return Err(SubmitTxError::Rejected(reason));
     }
@@ -884,7 +927,7 @@ fn rpc_eth_send_raw_transaction(raw_tx: Vec<u8>) -> Result<Vec<u8>, SubmitTxErro
             return Err(SubmitTxError::Rejected("sender queue full".to_string()));
         }
         Err(err) => {
-            debug_print(format!("rpc_eth_send_raw_transaction err: {:?}", err));
+            error!(error = ?err, "rpc_eth_send_raw_transaction failed");
             return Err(SubmitTxError::Internal("internal error".to_string()));
         }
     };
@@ -907,6 +950,9 @@ fn get_miner_allowlist() -> Vec<Principal> {
 
 #[ic_cdk::update]
 fn set_miner_allowlist(principals: Vec<Principal>) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
     require_manage_write()?;
     evm_db::stable_state::with_state_mut(|state| {
         let old_keys: Vec<_> = state
@@ -948,12 +994,18 @@ fn get_ops_status() -> OpsStatusView {
             safe_stop_latched: ops.safe_stop_latched,
             needs_migration: meta.needs_migration,
             schema_version: meta.schema_version,
+            log_filter_override: state.log_config.get().filter().map(str::to_string),
+            log_truncated_count: LOG_TRUNCATED_COUNT.load(Ordering::Relaxed),
+            critical_corrupt: critical_corrupt_state(),
         }
     })
 }
 
 #[ic_cdk::update]
 fn set_ops_config(config: OpsConfigView) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
     require_manage_write()?;
     if config.critical == 0 {
         return Err("input.ops_config.critical.non_positive".to_string());
@@ -969,6 +1021,29 @@ fn set_ops_config(config: OpsConfigView) -> Result<(), String> {
         });
     });
     observe_cycles();
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn set_log_filter(filter: Option<String>) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
+    require_manage_write()?;
+    let normalized = filter
+        .map(|raw| raw.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(value) = normalized.as_ref() {
+        if value.len() > LOG_CONFIG_FILTER_MAX {
+            return Err("input.log_filter.too_long".to_string());
+        }
+    }
+    evm_db::stable_state::with_state_mut(|state| {
+        let _ = state.log_config.set(evm_db::chain_data::LogConfigV1 {
+            has_filter: normalized.is_some(),
+            filter: normalized.unwrap_or_default(),
+        });
+    });
     Ok(())
 }
 
@@ -1037,6 +1112,9 @@ fn metrics(window: u64) -> MetricsView {
 
 #[ic_cdk::update]
 fn set_auto_mine(enabled: bool) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
     require_manage_write()?;
     evm_db::stable_state::with_state_mut(|state| {
         let mut chain_state = *state.chain_state.get();
@@ -1051,6 +1129,9 @@ fn set_auto_mine(enabled: bool) -> Result<(), String> {
 
 #[ic_cdk::update]
 fn set_mining_interval_ms(interval_ms: u64) -> Result<(), String> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(reason);
+    }
     require_manage_write()?;
     if interval_ms == 0 {
         return Err("input.mining_interval.non_positive".to_string());
@@ -1066,6 +1147,9 @@ fn set_mining_interval_ms(interval_ms: u64) -> Result<(), String> {
 
 #[ic_cdk::update]
 fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResultView, ProduceBlockError> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(ProduceBlockError::Internal(reason));
+    }
     if let Err(reason) = require_manage_write() {
         return Err(ProduceBlockError::Internal(reason));
     }
@@ -1375,15 +1459,104 @@ fn caller_key_to_principal(key: CallerKey) -> Option<Principal> {
 }
 
 fn migration_pending() -> bool {
+    if !schema_migration_tick(32) {
+        return true;
+    }
     let meta = get_meta();
     if meta.needs_migration || meta.schema_version < current_schema_version() {
         return true;
     }
-    let pending = with_state(|state| state.state_root_migration.get().phase != MigrationPhase::Done);
+    let pending =
+        with_state(|state| state.state_root_migration.get().phase != MigrationPhase::Done);
     if !pending {
         return false;
     }
     !chain::state_root_migration_tick(512)
+}
+
+fn critical_corrupt_state() -> bool {
+    let meta = get_meta();
+    if meta.needs_migration {
+        return true;
+    }
+    matches!(schema_migration_state().phase, SchemaMigrationPhase::Error)
+}
+
+fn schema_migration_tick(max_steps: u32) -> bool {
+    let mut steps = 0u32;
+    while steps < max_steps {
+        let mut state = schema_migration_state();
+        match state.phase {
+            SchemaMigrationPhase::Done => return true,
+            SchemaMigrationPhase::Error => return false,
+            SchemaMigrationPhase::Init => {
+                if state.from_version < 3 {
+                    set_tx_locs_v3_active(false);
+                    chain::clear_tx_locs_v3();
+                    state.cursor_key_set = false;
+                    state.cursor_key = [0u8; 32];
+                }
+                state.phase = SchemaMigrationPhase::Scan;
+                state.cursor = 0;
+                set_schema_migration_state(state);
+            }
+            SchemaMigrationPhase::Scan => {
+                state.phase = SchemaMigrationPhase::Rewrite;
+                state.cursor = 0;
+                set_schema_migration_state(state);
+            }
+            SchemaMigrationPhase::Rewrite => {
+                if state.from_version < 3 {
+                    let start_key = if state.cursor_key_set {
+                        Some(TxId(state.cursor_key))
+                    } else {
+                        None
+                    };
+                    let (last_key, copied, done) = chain::migrate_tx_locs_batch(start_key, 512);
+                    state.cursor = state.cursor.saturating_add(copied);
+                    if let Some(key) = last_key {
+                        state.cursor_key_set = true;
+                        state.cursor_key = key.0;
+                    }
+                    set_schema_migration_state(state);
+                    if !done {
+                        return false;
+                    }
+                }
+                state.phase = SchemaMigrationPhase::Verify;
+                state.cursor = 0;
+                set_schema_migration_state(state);
+            }
+            SchemaMigrationPhase::Verify => {
+                if state.from_version < 3 {
+                    let tx_locs_migrated = with_state(|s| s.tx_locs.len() == s.tx_locs_v3.len());
+                    if !tx_locs_migrated {
+                        state.phase = SchemaMigrationPhase::Error;
+                        state.last_error = 1;
+                        set_schema_migration_state(state);
+                        return false;
+                    }
+                    set_tx_locs_v3_active(true);
+                } else if !evm_db::meta::tx_locs_v3_active() {
+                    state.phase = SchemaMigrationPhase::Error;
+                    state.last_error = 2;
+                    set_schema_migration_state(state);
+                    return false;
+                }
+                if state.from_version < 2 {
+                    chain::clear_mempool_on_upgrade();
+                }
+                mark_migration_applied(state.from_version, state.to_version, time());
+                set_needs_migration(false);
+                state.phase = SchemaMigrationPhase::Done;
+                state.cursor = 0;
+                set_schema_migration_state(state);
+                return true;
+            }
+        }
+        steps = steps.saturating_add(1);
+    }
+    false
 }
 
 fn observe_cycles() -> OpsMode {
@@ -1434,14 +1607,160 @@ fn reject_write_reason() -> Option<String> {
     None
 }
 
+fn reject_anonymous_update() -> Option<String> {
+    reject_anonymous_principal(msg_caller())
+}
+
+fn reject_anonymous_principal(caller: Principal) -> Option<String> {
+    if caller == Principal::anonymous() {
+        return Some("auth.anonymous_forbidden".to_string());
+    }
+    None
+}
+
+fn init_tracing() {
+    static LOG_INIT: OnceLock<()> = OnceLock::new();
+    let _ = LOG_INIT.get_or_init(|| {
+        let env_filter = EnvFilter::new(resolve_log_filter().unwrap_or_else(|| "info".to_string()));
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_target(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .with_writer(IcDebugPrintMakeWriter)
+            .with_env_filter(env_filter)
+            .try_init();
+    });
+}
+
+fn resolve_log_filter() -> Option<String> {
+    if let Some(value) = read_env_var_guarded("LOG_FILTER", LOG_FILTER_MAX_LEN) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    with_state(|state| state.log_config.get().filter().map(str::to_string))
+}
+
+const MAX_ENV_VAR_NAME_LEN: usize = 128;
+const LOG_FILTER_MAX_LEN: usize = 256;
+static LOG_TRUNCATED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn read_env_var_guarded(name: &str, max_value_len: usize) -> Option<String> {
+    if name.len() > MAX_ENV_VAR_NAME_LEN {
+        return None;
+    }
+    if !env_var_name_exists(name) {
+        return None;
+    }
+    let value = env_var_value(name);
+    if value.len() > max_value_len {
+        warn!(
+            env_var = name,
+            max_value_len,
+            actual_len = value.len(),
+            "env var value too long; ignored"
+        );
+        return None;
+    }
+    Some(value)
+}
+
+#[derive(Clone, Copy)]
+struct IcDebugPrintMakeWriter;
+
+impl<'a> MakeWriter<'a> for IcDebugPrintMakeWriter {
+    type Writer = IcDebugPrintWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        IcDebugPrintWriter {
+            buffer: String::new(),
+        }
+    }
+}
+
+struct IcDebugPrintWriter {
+    buffer: String,
+}
+
+impl Write for IcDebugPrintWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.push_str(&String::from_utf8_lossy(buf));
+        emit_complete_lines(&mut self.buffer);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.trim().is_empty() {
+            emit_bounded_log_line(self.buffer.trim());
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for IcDebugPrintWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+fn emit_complete_lines(buffer: &mut String) {
+    static REENTRANT_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = REENTRANT_GUARD.get_or_init(|| Mutex::new(())).lock();
+    if guard.is_err() {
+        if !buffer.is_empty() {
+            ic_cdk::api::debug_print("{\"target\":\"tracing\",\"fallback\":true}".to_string());
+        }
+        return;
+    }
+    while let Some(newline_index) = buffer.find('\n') {
+        let line: String = buffer.drain(..=newline_index).collect();
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            emit_bounded_log_line(trimmed);
+        }
+    }
+}
+
+fn emit_bounded_log_line(line: &str) {
+    const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
+    if line.len() <= MAX_LOG_LINE_BYTES {
+        ic_cdk::api::debug_print(line.to_string());
+        return;
+    }
+    let mut prefix = String::new();
+    for ch in line.chars() {
+        let next_len = prefix.len() + ch.len_utf8();
+        if next_len > 1024 {
+            break;
+        }
+        prefix.push(ch);
+    }
+    let escaped = prefix
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    let truncated_count = LOG_TRUNCATED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    ic_cdk::api::debug_print(format!(
+        "{{\"truncated\":true,\"truncated_count\":{},\"max_bytes\":{MAX_LOG_LINE_BYTES},\"original_bytes\":{},\"prefix\":\"{}\"}}",
+        truncated_count,
+        line.len(),
+        escaped
+    ));
+}
+
 fn apply_post_upgrade_migrations() {
     let meta = get_meta();
     let current = current_schema_version();
     if meta.schema_version > current {
-        debug_print(format!(
-            "upgrade: schema {} is newer than supported {}",
-            meta.schema_version, current
-        ));
+        warn!(
+            schema_version = meta.schema_version,
+            supported_schema = current,
+            "upgrade schema is newer than supported"
+        );
         let mut next = meta;
         next.needs_migration = true;
         evm_db::meta::set_meta(next);
@@ -1449,13 +1768,17 @@ fn apply_post_upgrade_migrations() {
     }
 
     let from = meta.schema_version;
-    let mut to = from;
-    if from < 2 {
-        chain::clear_mempool_on_upgrade();
-        debug_print("mempool cleared on upgrade migration".to_string());
-        to = 2;
-    }
-    if to != from || meta.needs_migration {
+    if from < current || meta.needs_migration {
+        set_needs_migration(true);
+        set_schema_migration_state(SchemaMigrationState {
+            phase: SchemaMigrationPhase::Init,
+            cursor: 0,
+            from_version: from,
+            to_version: current,
+            last_error: 0,
+            cursor_key_set: false,
+            cursor_key: [0u8; 32],
+        });
         evm_db::stable_state::with_state_mut(|state| {
             let mut migration = *state.state_root_migration.get();
             if migration.phase == MigrationPhase::Done {
@@ -1466,10 +1789,10 @@ fn apply_post_upgrade_migrations() {
                 state.state_root_migration.set(migration);
             }
         });
-        mark_migration_applied(from, to, time());
     }
     if migration_pending() {
         let _ = chain::state_root_migration_tick(1024);
+        let _ = schema_migration_tick(1024);
     }
 }
 
@@ -1614,8 +1937,9 @@ pub fn export_did() -> String {
 mod tests {
     use super::{
         clamp_return_data, exec_error_to_code, inspect_method_allowed, map_execute_chain_result,
-        tx_id_from_bytes, ExecuteTxError,
+        reject_anonymous_principal, tx_id_from_bytes, ExecuteTxError,
     };
+    use candid::Principal;
     use evm_core::chain::{ChainError, ExecResult};
     use evm_core::revm_exec::{ExecError, OpHaltReason, OpTransactionError};
     use evm_db::chain_data::constants::MAX_RETURN_DATA;
@@ -1727,6 +2051,19 @@ mod tests {
     #[test]
     fn inspect_allowlist_rejects_unknown_methods() {
         assert!(!inspect_method_allowed("unknown_method"));
+    }
+
+    #[test]
+    fn reject_anonymous_principal_blocks_anonymous() {
+        let out = reject_anonymous_principal(Principal::anonymous());
+        assert_eq!(out, Some("auth.anonymous_forbidden".to_string()));
+    }
+
+    #[test]
+    fn reject_anonymous_principal_allows_non_anonymous() {
+        let principal = Principal::self_authenticating(b"wrapper-test-caller");
+        let out = reject_anonymous_principal(principal);
+        assert_eq!(out, None);
     }
 
     #[cfg(feature = "dev-faucet")]

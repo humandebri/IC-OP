@@ -1,12 +1,10 @@
 //! どこで: Phase1テスト / 何を: Eth raw tx デコード / なぜ: 分類と仕様境界を固定するため
 
-use alloy_consensus::{
-    SignableTransaction, TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy,
-};
+use alloy_consensus::{SignableTransaction, TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::eip2930::AccessList;
 use alloy_eips::eip7702::Authorization;
-use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use evm_core::tx_decode::{decode_eth_raw_tx, DecodeError};

@@ -10,13 +10,7 @@ use std::env;
 
 fn parse_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
     let trimmed = value.strip_prefix("0x").unwrap_or(value);
-    if trimmed.len() % 2 != 0 {
-        return Err("hex must have even length".to_string());
-    }
-    (0..trimmed.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&trimmed[i..i + 2], 16).map_err(|_| "invalid hex".to_string()))
-        .collect()
+    hex::decode(trimmed).map_err(|_| "invalid hex".to_string())
 }
 
 fn parse_address(value: &str) -> Result<Address, String> {
@@ -134,10 +128,7 @@ fn run() -> Result<(), String> {
 }
 
 fn print_hex(bytes: B256) {
-    for b in bytes.as_slice() {
-        print!("{b:02x}");
-    }
-    println!();
+    println!("{}", hex::encode(bytes.as_slice()));
 }
 
 fn print_bytes(bytes: &[u8]) {

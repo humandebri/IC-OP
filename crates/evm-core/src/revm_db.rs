@@ -1,5 +1,6 @@
 //! どこで: Phase1のREVM DB実装 / 何を: StableStateへ接続 / なぜ: 実行エンジンと永続化を繋ぐため
 
+use crate::bytes::{address_to_bytes, b256_to_bytes, u256_to_bytes};
 use crate::selfdestruct::selfdestruct_address;
 use evm_db::stable_state::with_state_mut;
 use evm_db::types::keys::{make_account_key, make_code_key, make_storage_key};
@@ -176,22 +177,6 @@ fn info_to_account_val(info: &AccountInfo) -> AccountVal {
     let balance = info.balance.to_be_bytes();
     let code_hash = b256_to_bytes(info.code_hash);
     AccountVal::from_parts(info.nonce, balance, code_hash)
-}
-
-fn address_to_bytes(address: Address) -> [u8; 20] {
-    let mut out = [0u8; 20];
-    out.copy_from_slice(address.as_ref());
-    out
-}
-
-fn b256_to_bytes(hash: B256) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(hash.as_ref());
-    out
-}
-
-fn u256_to_bytes(value: U256) -> [u8; 32] {
-    value.to_be_bytes()
 }
 
 fn u256_val_to_u256(value: U256Val) -> U256 {

@@ -54,13 +54,16 @@ impl Storable for BlockData {
         out.extend_from_slice(&self.state_root);
         let len = match len_to_u32(self.tx_ids.len()) {
             Some(value) => value,
-            None => return encode_guarded(b"block_data", Vec::new(), MAX_BLOCK_DATA_SIZE_U32),
+            None => return encode_fallback_block(),
         };
         out.extend_from_slice(&len.to_be_bytes());
         for tx_id in self.tx_ids.iter() {
             out.extend_from_slice(&tx_id.0);
         }
-        encode_guarded(b"block_data_encode", out, MAX_BLOCK_DATA_SIZE_U32)
+        match encode_guarded(b"block_data_encode", out, MAX_BLOCK_DATA_SIZE_U32) {
+            Ok(value) => value,
+            Err(_) => encode_fallback_block(),
+        }
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -73,7 +76,7 @@ impl Storable for BlockData {
         out.extend_from_slice(&self.state_root);
         let len = match len_to_u32(self.tx_ids.len()) {
             Some(value) => value,
-            None => return Vec::new(),
+            None => return encode_fallback_block().into_owned(),
         };
         out.extend_from_slice(&len.to_be_bytes());
         for tx_id in self.tx_ids.iter() {
@@ -196,7 +199,10 @@ impl Storable for Head {
         out[0..8].copy_from_slice(&self.number.to_be_bytes());
         out[8..8 + HASH_LEN].copy_from_slice(&self.block_hash);
         out[8 + HASH_LEN..8 + HASH_LEN + 8].copy_from_slice(&self.timestamp.to_be_bytes());
-        encode_guarded(b"head_encode", out.to_vec(), 8 + HASH_LEN_U32 + 8)
+        match encode_guarded(b"head_encode", out.to_vec(), 8 + HASH_LEN_U32 + 8) {
+            Ok(value) => value,
+            Err(_) => Cow::Owned(vec![0u8; (8 + HASH_LEN_U32 + 8) as usize]),
+        }
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -243,5 +249,22 @@ fn len_to_u32(len: usize) -> Option<u32> {
             record_corrupt(b"block_len");
             None
         }
+    }
+}
+
+fn encode_fallback_block() -> Cow<'static, [u8]> {
+    let mut out = Vec::with_capacity(
+        8 + HASH_LEN + HASH_LEN + 8 + HASH_LEN + HASH_LEN + 4,
+    );
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&[0u8; HASH_LEN]);
+    out.extend_from_slice(&[0u8; HASH_LEN]);
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&[0u8; HASH_LEN]);
+    out.extend_from_slice(&[0u8; HASH_LEN]);
+    out.extend_from_slice(&0u32.to_be_bytes());
+    match encode_guarded(b"block_data_encode", out, MAX_BLOCK_DATA_SIZE_U32) {
+        Ok(value) => value,
+        Err(_) => Cow::Owned(vec![0u8; MAX_BLOCK_DATA_SIZE_U32 as usize]),
     }
 }

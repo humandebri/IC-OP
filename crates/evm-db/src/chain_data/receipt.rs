@@ -38,10 +38,13 @@ impl Storable for ReceiptLike {
             Ok(value) => value,
             Err(_) => {
                 record_corrupt(b"receipt_encode");
-                return Cow::Owned(Vec::new());
+                return encode_fallback_receipt();
             }
         };
-        encode_guarded(b"receipt_encode", encoded, RECEIPT_MAX_SIZE_U32)
+        match encode_guarded(b"receipt_encode", encoded, RECEIPT_MAX_SIZE_U32) {
+            Ok(value) => value,
+            Err(_) => encode_fallback_receipt(),
+        }
     }
     fn into_bytes(self) -> Vec<u8> {
         self.to_bytes().into_owned()
@@ -262,6 +265,33 @@ enum ReceiptEncodeError {
     TooManyTopics,
     LogDataTooLarge,
     LengthOverflow,
+}
+
+fn encode_fallback_receipt() -> Cow<'static, [u8]> {
+    let receipt = corrupt_receipt();
+    let encoded = receipt.encode_checked().unwrap_or_else(|_| {
+        let mut out = Vec::with_capacity(96);
+        out.extend_from_slice(&RECEIPT_V2_MAGIC);
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&0u64.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.push(0u8);
+        out.extend_from_slice(&0u64.to_be_bytes());
+        out.extend_from_slice(&0u64.to_be_bytes());
+        out.extend_from_slice(&0u128.to_be_bytes());
+        out.extend_from_slice(&0u128.to_be_bytes());
+        out.extend_from_slice(&0u128.to_be_bytes());
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.push(0u8);
+        out.extend_from_slice(&[0u8; RECEIPT_CONTRACT_ADDR_LEN]);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out
+    });
+    match encode_guarded(b"receipt_encode", encoded, RECEIPT_MAX_SIZE_U32) {
+        Ok(value) => value,
+        Err(_) => Cow::Owned(vec![0u8; RECEIPT_MAX_SIZE_U32 as usize]),
+    }
 }
 
 fn corrupt_receipt() -> ReceiptLike {

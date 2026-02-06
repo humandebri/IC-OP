@@ -73,7 +73,10 @@ impl Storable for PruneStateV1 {
         out[4..12].copy_from_slice(&self.pruned_before_block.to_be_bytes());
         out[12..20].copy_from_slice(&self.next_prune_block.to_be_bytes());
         out[20..28].copy_from_slice(&self.journal_block_number.to_be_bytes());
-        encode_guarded(b"prune_state", out.to_vec(), PRUNE_STATE_SIZE_U32)
+        match encode_guarded(b"prune_state", out.to_vec(), PRUNE_STATE_SIZE_U32) {
+            Ok(value) => value,
+            Err(_) => Cow::Owned(vec![0u8; PRUNE_STATE_SIZE_U32 as usize]),
+        }
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -119,12 +122,12 @@ impl Storable for PruneJournal {
             Ok(value) => value,
             Err(_) => {
                 record_corrupt(b"prune_journal_len");
-                return encode_guarded(b"prune_journal", Vec::new(), JOURNAL_MAX_SIZE_U32);
+                return encode_fallback_prune_journal();
             }
         };
         if len > MAX_PTRS_U32 {
             record_corrupt(b"prune_journal_len");
-            return encode_guarded(b"prune_journal", Vec::new(), JOURNAL_MAX_SIZE_U32);
+            return encode_fallback_prune_journal();
         }
         let mut out = Vec::with_capacity(4 + (self.ptrs.len() * 20));
         out.extend_from_slice(&len.to_be_bytes());
@@ -132,7 +135,10 @@ impl Storable for PruneJournal {
             let bytes = ptr.to_bytes();
             out.extend_from_slice(&bytes);
         }
-        encode_guarded(b"prune_journal", out, JOURNAL_MAX_SIZE_U32)
+        match encode_guarded(b"prune_journal", out, JOURNAL_MAX_SIZE_U32) {
+            Ok(value) => value,
+            Err(_) => Cow::Owned(vec![0u8; JOURNAL_MAX_SIZE_U32 as usize]),
+        }
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -178,4 +184,13 @@ impl Storable for PruneJournal {
         max_size: JOURNAL_MAX_SIZE_U32,
         is_fixed_size: false,
     };
+}
+
+fn encode_fallback_prune_journal() -> Cow<'static, [u8]> {
+    let mut out = Vec::with_capacity(4);
+    out.extend_from_slice(&0u32.to_be_bytes());
+    match encode_guarded(b"prune_journal", out, JOURNAL_MAX_SIZE_U32) {
+        Ok(value) => value,
+        Err(_) => Cow::Owned(vec![0u8; JOURNAL_MAX_SIZE_U32 as usize]),
+    }
 }

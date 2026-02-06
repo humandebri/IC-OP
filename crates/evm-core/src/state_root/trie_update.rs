@@ -1,9 +1,10 @@
 //! どこで: state root差分計算 / 何を: journal生成 / なぜ: apply境界を明確化し通常経路の全件再構築を避けるため
 
 use super::{
-    b256_to_bytes, build_anchor_delta, is_empty_trie_account, normalize_code_hash, AccountDelta,
-    AnchorDelta, StorageRootUpdate, TrieDelta,
+    build_anchor_delta, is_empty_trie_account, normalize_code_hash, AccountDelta, AnchorDelta,
+    StorageRootUpdate, TrieDelta,
 };
+use crate::bytes::b256_to_bytes;
 use crate::hash::keccak256;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rlp::{Decodable, Encodable};

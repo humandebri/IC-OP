@@ -5,6 +5,7 @@ mod node_store;
 mod trie_update;
 
 use crate::hash::keccak256;
+use crate::bytes::b256_to_bytes;
 use crate::revm_exec::StateDiff;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rlp::Encodable;
@@ -20,7 +21,7 @@ use ic_stable_structures::StableBTreeMap;
 use ic_stable_structures::Storable;
 use node_codec::rlp_node_to_root;
 use node_store::{apply_journal, AnchorDelta, JournalUpdate};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use trie_update::{
     build_state_update_journal, build_state_update_journal_full, NewNodeRecords, NodeDeltaCounts,
 };
@@ -428,19 +429,22 @@ fn build_trie_delta(state_diffs: &[StateDiff]) -> TrieDelta {
 #[allow(dead_code)]
 fn compute_state_root_fullscan_overlay(state: &StableState, delta: &TrieDelta) -> [u8; 32] {
     let mut storage_by_addr: BTreeMap<[u8; 20], BTreeMap<[u8; 32], [u8; 32]>> = BTreeMap::new();
-    for entry in state.storage.iter() {
-        let key = entry.key().0;
-        if key[0] != 0x02 {
-            continue;
+    for addr in delta.accounts.keys() {
+        let lower = make_storage_key(*addr, [0u8; 32]);
+        let upper = make_storage_key(*addr, [0xffu8; 32]);
+        let mut slots: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+        for entry in state.storage.range(lower..=upper) {
+            let key = entry.key().0;
+            if key[0] != 0x02 || key[1..21] != addr[..] {
+                break;
+            }
+            let mut slot = [0u8; 32];
+            slot.copy_from_slice(&key[21..53]);
+            slots.insert(slot, entry.value().0);
         }
-        let mut addr = [0u8; 20];
-        addr.copy_from_slice(&key[1..21]);
-        let mut slot = [0u8; 32];
-        slot.copy_from_slice(&key[21..53]);
-        storage_by_addr
-            .entry(addr)
-            .or_default()
-            .insert(slot, entry.value().0);
+        if !slots.is_empty() {
+            storage_by_addr.insert(*addr, slots);
+        }
     }
     for (addr, account_delta) in delta.accounts.iter() {
         let slots = storage_by_addr.entry(*addr).or_default();
@@ -478,16 +482,24 @@ fn compute_state_root_fullscan_overlay(state: &StableState, delta: &TrieDelta) -
         if deleted {
             continue;
         }
-        let storage_root = storage_by_addr
-            .get(&addr)
-            .map(|slots| {
-                storage_root_unhashed(
-                    slots
-                        .iter()
-                        .map(|(slot, value)| (B256::from(*slot), U256::from_be_bytes(*value))),
-                )
-            })
-            .unwrap_or(EMPTY_ROOT_HASH);
+        let storage_root = if delta.accounts.contains_key(&addr) {
+            storage_by_addr
+                .get(&addr)
+                .map(|slots| {
+                    storage_root_unhashed(
+                        slots
+                            .iter()
+                            .map(|(slot, value)| (B256::from(*slot), U256::from_be_bytes(*value))),
+                    )
+                })
+                .unwrap_or(EMPTY_ROOT_HASH)
+        } else {
+            state
+                .state_storage_roots
+                .get(&make_account_key(addr))
+                .map(|value| B256::from(value.0))
+                .unwrap_or_else(|| compute_storage_root_for_address(state, addr))
+        };
         let trie_account = TrieAccount {
             nonce,
             balance,
@@ -624,29 +636,63 @@ fn build_state_update_journal_overlay(
     }
 
     let mut node_delta_counts: NodeDeltaCounts = BTreeMap::new();
-    let mut all_keys: BTreeSet<HashKey> = BTreeSet::new();
-    for key in state.state_root_node_db.iter().map(|e| *e.key()) {
-        all_keys.insert(key);
-    }
-    for key in node_map.keys().copied() {
-        all_keys.insert(key);
-    }
-    for key in new_node_records.keys().copied() {
-        all_keys.insert(key);
-    }
-    for key in all_keys {
-        let before = state
-            .state_root_node_db
-            .get(&key)
-            .map(|record| i64::from(record.refcnt))
-            .unwrap_or(0);
-        let after = node_map
-            .get(&key)
-            .map(|record| i64::from(record.refcnt))
-            .unwrap_or(0);
-        let diff = after - before;
+    let mut before_iter = state.state_root_node_db.iter();
+    let mut after_iter = node_map.iter();
+    let mut new_iter = new_node_records.iter();
+    let mut before = before_iter.next();
+    let mut after = after_iter.next();
+    let mut new_only = new_iter.next();
+    while before.is_some() || after.is_some() || new_only.is_some() {
+        let mut next_key = None;
+        if let Some(entry) = before.as_ref() {
+            next_key = Some(*entry.key());
+        }
+        if let Some((key, _)) = after {
+            let key = *key;
+            next_key = Some(match next_key {
+                Some(current) if current <= key => current,
+                _ => key,
+            });
+        }
+        if let Some((key, _)) = new_only {
+            let key = *key;
+            next_key = Some(match next_key {
+                Some(current) if current <= key => current,
+                _ => key,
+            });
+        }
+        let key = match next_key {
+            Some(value) => value,
+            None => break,
+        };
+        let before_count = match before.as_ref() {
+            Some(entry) if *entry.key() == key => i64::from(entry.value().refcnt),
+            _ => 0,
+        };
+        let after_count = match after {
+            Some((entry_key, entry_value)) if *entry_key == key => {
+                i64::from(entry_value.refcnt)
+            }
+            _ => 0,
+        };
+        let diff = after_count - before_count;
         if diff != 0 {
             node_delta_counts.insert(key, diff);
+        }
+        if let Some(entry) = before.as_ref() {
+            if *entry.key() == key {
+                before = before_iter.next();
+            }
+        }
+        if let Some((entry_key, _)) = after {
+            if *entry_key == key {
+                after = after_iter.next();
+            }
+        }
+        if let Some((entry_key, _)) = new_only {
+            if *entry_key == key {
+                new_only = new_iter.next();
+            }
         }
     }
 
@@ -783,6 +829,29 @@ fn collect_overlay_accounts_and_storage(
             trie_accounts.insert(*addr, trie_account);
         }
     }
+    for entry in state.state_storage_roots.iter() {
+        let key = entry.key().0;
+        if key[0] != 0x01 {
+            continue;
+        }
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&key[1..21]);
+        if trie_accounts.contains_key(&addr) {
+            continue;
+        }
+        if delta.accounts.contains_key(&addr) {
+            continue;
+        }
+        let trie_account = TrieAccount {
+            nonce: 0,
+            balance: U256::ZERO,
+            storage_root: B256::from(entry.value().0),
+            code_hash: KECCAK_EMPTY,
+        };
+        if !is_empty_trie_account(&trie_account) {
+            trie_accounts.insert(addr, trie_account);
+        }
+    }
     (trie_accounts, storage_by_addr)
 }
 
@@ -902,6 +971,8 @@ fn build_anchor_delta(
 
 #[cfg(test)]
 fn apply_node_db_records(state: &mut StableState, records: Vec<(HashKey, NodeRecord)>) {
+    use std::collections::BTreeSet;
+
     let mut next: BTreeMap<HashKey, NodeRecord> = BTreeMap::new();
     for (key, record) in records {
         if keccak256(&record.rlp) != key.0 {
@@ -1109,12 +1180,6 @@ fn normalize_code_hash(code_hash: B256) -> B256 {
     } else {
         code_hash
     }
-}
-
-fn b256_to_bytes(value: B256) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(value.as_ref());
-    out
 }
 
 pub fn compute_block_change_hash(tx_change_hashes: &[[u8; 32]]) -> [u8; 32] {

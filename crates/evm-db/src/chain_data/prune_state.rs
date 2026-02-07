@@ -2,8 +2,8 @@
 
 use crate::blob_ptr::BlobPtr;
 use crate::chain_data::codec::{encode_guarded, mark_decode_failure};
-use crate::corrupt_log::record_corrupt;
 use crate::chain_data::constants::MAX_TXS_PER_BLOCK_U32;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -23,7 +23,9 @@ pub struct PruneStateV1 {
     pub journal_block_number: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
 #[repr(C)]
 struct PruneStateWire {
     schema_version: U32,

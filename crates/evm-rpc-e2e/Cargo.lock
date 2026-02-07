@@ -1277,6 +1277,7 @@ dependencies = [
  "ic-stable-structures",
  "tracing",
  "wincode",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1801,9 +1802,10 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
+ "candid",
  "evm-db",
+ "hex",
  "ic-cdk",
- "ic-stable-structures",
  "revm",
 ]
 

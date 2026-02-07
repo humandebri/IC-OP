@@ -17,7 +17,11 @@ pub fn encode_guarded<'a>(
     Ok(bytes)
 }
 
-pub fn ensure_encoded_within_bound(label: &'static [u8], encoded_len: usize, max_size: u32) -> bool {
+pub fn ensure_encoded_within_bound(
+    label: &'static [u8],
+    encoded_len: usize,
+    max_size: u32,
+) -> bool {
     if encoded_len > max_size as usize {
         record_corrupt(label);
     }

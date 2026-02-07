@@ -14,20 +14,20 @@ use crate::tx_submit;
 use evm_db::chain_data::constants::{
     DEFAULT_BLOCK_GAS_LIMIT, DROPPED_RING_CAPACITY, DROP_CODE_CALLER_MISSING, DROP_CODE_DECODE,
     DROP_CODE_EXEC, DROP_CODE_INVALID_FEE, DROP_CODE_MISSING, DROP_CODE_REPLACED,
-    DROP_CODE_RESULT_TOO_LARGE,
-    MAX_PENDING_GLOBAL, MAX_PENDING_PER_SENDER, MAX_TX_SIZE, READY_CANDIDATE_LIMIT,
+    DROP_CODE_RESULT_TOO_LARGE, MAX_PENDING_GLOBAL, MAX_PENDING_PER_SENDER, MAX_TX_SIZE,
+    READY_CANDIDATE_LIMIT,
 };
 use evm_db::chain_data::{
     BlockData, Head, PruneJournal, PrunePolicy, ReadyKey, ReceiptLike, SenderKey, SenderNonceKey,
     StoredTx, StoredTxBytes, StoredTxError, TxId, TxIndexEntry, TxKind, TxLoc, TxLocKind,
 };
-use evm_db::memory::VMem;
 use evm_db::meta::tx_locs_v3_active;
-use evm_db::stable_state::{with_state, with_state_mut, StableState};
+use evm_db::stable_state::{
+    clear_map as clear_stable_map, with_state, with_state_mut, StableState,
+};
 use evm_db::types::keys::make_account_key;
 use evm_db::types::values::AccountVal;
-use ic_stable_structures::StableBTreeMap;
-use ic_stable_structures::Storable;
+use evm_db::Storable;
 use revm::database::CacheDB;
 use revm::database_interface::DatabaseCommit;
 use revm::primitives::Address;
@@ -133,7 +133,7 @@ pub fn state_root_migration_tick(max_steps: u32) -> bool {
 
 pub fn clear_tx_locs_v3() {
     with_state_mut(|state| {
-        clear_map(&mut state.tx_locs_v3);
+        clear_stable_map(&mut state.tx_locs_v3);
     });
 }
 
@@ -172,24 +172,14 @@ pub fn migrate_tx_locs_batch(start_key: Option<TxId>, max_items: u32) -> (Option
 
 pub fn clear_mempool_on_upgrade() {
     with_state_mut(|state| {
-        clear_map(&mut state.ready_queue);
-        clear_map(&mut state.ready_key_by_tx_id);
-        clear_map(&mut state.pending_by_sender_nonce);
-        clear_map(&mut state.pending_min_nonce);
-        clear_map(&mut state.pending_meta_by_tx_id);
-        clear_map(&mut state.pending_current_by_sender);
-        clear_map(&mut state.sender_expected_nonce);
+        clear_stable_map(&mut state.ready_queue);
+        clear_stable_map(&mut state.ready_key_by_tx_id);
+        clear_stable_map(&mut state.pending_by_sender_nonce);
+        clear_stable_map(&mut state.pending_min_nonce);
+        clear_stable_map(&mut state.pending_meta_by_tx_id);
+        clear_stable_map(&mut state.pending_current_by_sender);
+        clear_stable_map(&mut state.sender_expected_nonce);
     });
-}
-
-fn clear_map<K: Copy + Ord + Storable, V: Storable>(map: &mut StableBTreeMap<K, V, VMem>) {
-    loop {
-        let key = match map.range(..).next() {
-            Some(entry) => *entry.key(),
-            None => break,
-        };
-        map.remove(&key);
-    }
 }
 
 fn tx_locs_get(state: &StableState, tx_id: &TxId) -> Option<TxLoc> {
@@ -717,7 +707,12 @@ pub fn produce_block(max_txs: usize) -> Result<BlockData, ChainError> {
         with_state_mut(|state| {
             for drop in drops.iter() {
                 mark_dropped_and_purge_payload(state, drop.tx_id, drop.drop_code);
-                advance_sender_after_tx(state, drop.tx_id, drop.sender_override, drop.nonce_override);
+                advance_sender_after_tx(
+                    state,
+                    drop.tx_id,
+                    drop.sender_override,
+                    drop.nonce_override,
+                );
             }
             let mut metrics = *state.metrics_state.get();
             for (idx, count) in dropped_by_code.iter().enumerate() {

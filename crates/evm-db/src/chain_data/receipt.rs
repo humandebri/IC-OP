@@ -41,11 +41,7 @@ impl Storable for ReceiptLike {
                 return encode_fallback_receipt();
             }
         };
-        match encode_guarded(
-            b"receipt_encode",
-            Cow::Owned(encoded),
-            RECEIPT_MAX_SIZE_U32,
-        ) {
+        match encode_guarded(b"receipt_encode", Cow::Owned(encoded), RECEIPT_MAX_SIZE_U32) {
             Ok(value) => value,
             Err(_) => encode_fallback_receipt(),
         }
@@ -248,7 +244,8 @@ impl ReceiptLike {
                 out.extend_from_slice(&[0u8; RECEIPT_CONTRACT_ADDR_LEN]);
             }
         }
-        let logs_len = u32::try_from(self.logs.len()).map_err(|_| ReceiptEncodeError::LengthOverflow)?;
+        let logs_len =
+            u32::try_from(self.logs.len()).map_err(|_| ReceiptEncodeError::LengthOverflow)?;
         out.extend_from_slice(&logs_len.to_be_bytes());
         for log in self.logs.iter() {
             let topics = log.data.topics();
@@ -306,11 +303,7 @@ fn encode_fallback_receipt() -> Cow<'static, [u8]> {
         out.extend_from_slice(&0u32.to_be_bytes());
         out
     });
-    match encode_guarded(
-        b"receipt_encode",
-        Cow::Owned(encoded),
-        RECEIPT_MAX_SIZE_U32,
-    ) {
+    match encode_guarded(b"receipt_encode", Cow::Owned(encoded), RECEIPT_MAX_SIZE_U32) {
         Ok(value) => value,
         Err(_) => Cow::Owned(vec![0u8; RECEIPT_MAX_SIZE_U32 as usize]),
     }

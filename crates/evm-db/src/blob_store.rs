@@ -73,9 +73,7 @@ impl Storable for AllocKey {
         let data = bytes.as_ref();
         if data.len() != 12 {
             record_corrupt(b"alloc_key");
-            return Self {
-                0: [0u8; 12],
-            };
+            return Self { 0: [0u8; 12] };
         }
         let mut out = [0u8; 12];
         out.copy_from_slice(data);
@@ -233,12 +231,14 @@ impl BlobStore {
             return Err(BlobError::InvalidState);
         }
         let len_u64 = u64::from(ptr.len());
-        let end = ptr.offset().checked_add(len_u64).ok_or(BlobError::Overflow)?;
+        let end = ptr
+            .offset()
+            .checked_add(len_u64)
+            .ok_or(BlobError::Overflow)?;
         if end > *self.arena_end.get() {
             return Err(BlobError::InvalidPointer);
         }
-        let mut out =
-            vec![0u8; usize::try_from(ptr.len()).map_err(|_| BlobError::LengthTooLarge)?];
+        let mut out = vec![0u8; usize::try_from(ptr.len()).map_err(|_| BlobError::LengthTooLarge)?];
         self.arena.read(ptr.offset(), &mut out);
         Ok(out)
     }

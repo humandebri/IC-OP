@@ -116,8 +116,7 @@ fn encode_fallback_tx_loc() -> Cow<'static, [u8]> {
     let fallback = TxLoc::queued(0);
     let encoded = wincode::config::serialize(&fallback, tx_loc_wincode_config())
         .unwrap_or_else(|_| Vec::new());
-    let fixed = encode_fixed_tx_loc(&fallback, &encoded)
-        .unwrap_or([0u8; TX_LOC_SIZE_U32 as usize]);
+    let fixed = encode_fixed_tx_loc(&fallback, &encoded).unwrap_or([0u8; TX_LOC_SIZE_U32 as usize]);
     match encode_guarded(
         b"tx_loc_encode",
         Cow::Owned(fixed.to_vec()),

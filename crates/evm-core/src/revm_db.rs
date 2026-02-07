@@ -5,7 +5,7 @@ use crate::selfdestruct::selfdestruct_address;
 use evm_db::stable_state::with_state_mut;
 use evm_db::types::keys::{make_account_key, make_code_key, make_storage_key};
 use evm_db::types::values::{AccountVal, CodeVal, U256Val};
-use ic_stable_structures::Storable;
+use evm_db::Storable;
 use revm::database_interface::{Database, DatabaseCommit, DatabaseRef};
 use revm::primitives::{Address, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256};
 use revm::state::{Account, AccountInfo, Bytecode};

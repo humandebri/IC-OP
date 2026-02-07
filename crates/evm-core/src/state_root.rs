@@ -4,8 +4,8 @@ mod node_codec;
 mod node_store;
 mod trie_update;
 
-use crate::hash::keccak256;
 use crate::bytes::b256_to_bytes;
+use crate::hash::keccak256;
 use crate::revm_exec::StateDiff;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rlp::Encodable;
@@ -14,11 +14,8 @@ use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
 use alloy_trie::{Nibbles, TrieMask};
 use alloy_trie::{TrieAccount, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use evm_db::chain_data::{HashKey, MigrationPhase, NodeRecord};
-use evm_db::memory::VMem;
-use evm_db::stable_state::StableState;
+use evm_db::stable_state::{clear_map as clear_stable_map, StableState};
 use evm_db::types::keys::{make_account_key, make_storage_key, AccountKey};
-use ic_stable_structures::StableBTreeMap;
-use ic_stable_structures::Storable;
 use node_codec::rlp_node_to_root;
 use node_store::{apply_journal, AnchorDelta, JournalUpdate};
 use std::collections::BTreeMap;
@@ -249,7 +246,7 @@ pub fn apply_state_root_commit(state: &mut StableState, prepared: PreparedStateR
         },
     );
     if !prepared.updated_account_leaf_hashes.is_empty() {
-        clear_map(&mut state.state_root_account_leaf_hash);
+        clear_stable_map(&mut state.state_root_account_leaf_hash);
         for (key, hash) in prepared.updated_account_leaf_hashes {
             if state
                 .state_root_node_db
@@ -303,7 +300,7 @@ pub fn run_migration_tick(state: &mut StableState, max_steps: u32) -> bool {
         }
         MigrationPhase::BuildTrie => {
             if migration.cursor == 0 {
-                clear_map(&mut state.state_storage_roots);
+                clear_stable_map(&mut state.state_storage_roots);
             }
             let start = usize::try_from(migration.cursor).unwrap_or(usize::MAX);
             let limit = usize::try_from(max_steps).unwrap_or(usize::MAX);
@@ -345,9 +342,9 @@ pub fn run_migration_tick(state: &mut StableState, max_steps: u32) -> bool {
             return false;
         }
         MigrationPhase::BuildRefcnt => {
-            clear_map(&mut state.state_root_node_db);
-            clear_map(&mut state.state_root_account_leaf_hash);
-            clear_map(&mut state.state_root_gc_queue);
+            clear_stable_map(&mut state.state_root_node_db);
+            clear_stable_map(&mut state.state_root_account_leaf_hash);
+            clear_stable_map(&mut state.state_root_gc_queue);
             state
                 .state_root_gc_state
                 .set(evm_db::chain_data::GcStateV1::new());
@@ -360,7 +357,7 @@ pub fn run_migration_tick(state: &mut StableState, max_steps: u32) -> bool {
                     anchor_delta: built.anchor_delta,
                 },
             );
-            clear_map(&mut state.state_root_account_leaf_hash);
+            clear_stable_map(&mut state.state_root_account_leaf_hash);
             for (key, hash) in built.updated_account_leaf_hashes {
                 state.state_root_account_leaf_hash.insert(key, hash);
             }
@@ -670,9 +667,7 @@ fn build_state_update_journal_overlay(
             _ => 0,
         };
         let after_count = match after {
-            Some((entry_key, entry_value)) if *entry_key == key => {
-                i64::from(entry_value.refcnt)
-            }
+            Some((entry_key, entry_value)) if *entry_key == key => i64::from(entry_value.refcnt),
             _ => 0,
         };
         let diff = after_count - before_count;
@@ -1057,7 +1052,7 @@ fn ensure_node_db_bootstrapped(state: &mut StableState) {
             anchor_delta: built.anchor_delta,
         },
     );
-    clear_map(&mut state.state_root_account_leaf_hash);
+    clear_stable_map(&mut state.state_root_account_leaf_hash);
     for (key, hash) in built.updated_account_leaf_hashes {
         state.state_root_account_leaf_hash.insert(key, hash);
     }
@@ -1193,16 +1188,6 @@ pub fn compute_block_change_hash(tx_change_hashes: &[[u8; 32]]) -> [u8; 32] {
 
 pub fn empty_tx_change_hash() -> [u8; 32] {
     keccak256(b"ic-evm:tx-change:v1")
-}
-
-fn clear_map<K: Copy + Ord + Storable, V: Storable>(map: &mut StableBTreeMap<K, V, VMem>) {
-    loop {
-        let key = match map.range(..).next() {
-            Some(entry) => *entry.key(),
-            None => break,
-        };
-        map.remove(&key);
-    }
 }
 
 #[cfg(test)]

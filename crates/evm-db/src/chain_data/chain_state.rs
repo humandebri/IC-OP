@@ -27,7 +27,9 @@ pub struct ChainStateV1 {
     pub min_priority_fee: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
 #[repr(C)]
 struct ChainStateWire {
     schema_version: U32,

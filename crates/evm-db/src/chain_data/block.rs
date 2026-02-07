@@ -1,11 +1,11 @@
 //! どこで: Phase1のブロックモデル / 何を: BlockDataとHead / なぜ: 決定的なブロック保存のため
 
 use crate::chain_data::codec::{encode_guarded, mark_decode_failure};
-use crate::corrupt_log::record_corrupt;
 use crate::chain_data::constants::{
     HASH_LEN, HASH_LEN_U32, MAX_BLOCK_DATA_SIZE_U32, MAX_TXS_PER_BLOCK,
 };
 use crate::chain_data::tx::TxId;
+use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -62,7 +62,11 @@ impl Storable for BlockData {
         for tx_id in self.tx_ids.iter() {
             out.extend_from_slice(&tx_id.0);
         }
-        match encode_guarded(b"block_data_encode", Cow::Owned(out), MAX_BLOCK_DATA_SIZE_U32) {
+        match encode_guarded(
+            b"block_data_encode",
+            Cow::Owned(out),
+            MAX_BLOCK_DATA_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => encode_fallback_block(),
         }
@@ -195,7 +199,9 @@ pub struct Head {
     pub timestamp: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
 #[repr(C)]
 struct HeadWire {
     number: U64,
@@ -276,9 +282,7 @@ fn len_to_u32(len: usize) -> Option<u32> {
 }
 
 fn encode_fallback_block() -> Cow<'static, [u8]> {
-    let mut out = Vec::with_capacity(
-        8 + HASH_LEN + HASH_LEN + 8 + HASH_LEN + HASH_LEN + 4,
-    );
+    let mut out = Vec::with_capacity(8 + HASH_LEN + HASH_LEN + 8 + HASH_LEN + HASH_LEN + 4);
     out.extend_from_slice(&0u64.to_be_bytes());
     out.extend_from_slice(&[0u8; HASH_LEN]);
     out.extend_from_slice(&[0u8; HASH_LEN]);
@@ -286,7 +290,11 @@ fn encode_fallback_block() -> Cow<'static, [u8]> {
     out.extend_from_slice(&[0u8; HASH_LEN]);
     out.extend_from_slice(&[0u8; HASH_LEN]);
     out.extend_from_slice(&0u32.to_be_bytes());
-    match encode_guarded(b"block_data_encode", Cow::Owned(out), MAX_BLOCK_DATA_SIZE_U32) {
+    match encode_guarded(
+        b"block_data_encode",
+        Cow::Owned(out),
+        MAX_BLOCK_DATA_SIZE_U32,
+    ) {
         Ok(value) => value,
         Err(_) => Cow::Owned(vec![0u8; MAX_BLOCK_DATA_SIZE_U32 as usize]),
     }

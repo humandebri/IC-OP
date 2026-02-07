@@ -1750,7 +1750,6 @@ dependencies = [
  "evm-db",
  "hex",
  "ic-cdk",
- "ic-stable-structures",
  "revm",
 ]
 

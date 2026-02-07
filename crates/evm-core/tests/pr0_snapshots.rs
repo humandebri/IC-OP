@@ -74,7 +74,7 @@ fn snapshot_tx_outcome_matrix_and_block_fields() {
     // - OP由来のsystem tx会計を除去し、標準EVM実行へ統一したことで state_root/block_hash が更新
     assert_eq!(
         block_outcome,
-        "number=3 block_hash=9148f185b1ba2c03f961cce08357f3193930e5cd6e39867fef2160d7da4014ce tx_list_hash=4ad087ec0641a22f03bb82cb8cf391aca8c73cb30fd8eeda10b813d1f2a6c6df state_root=93c38df78b09ca12737cd5a446baa0a24444c2d799c7bb633ab6ccb673af1217"
+        "number=3 block_hash=d76f3db742673eeebb3a09007b87a3dd277c54d621db7dc4e2c977d8b1a86d3d tx_list_hash=4ad087ec0641a22f03bb82cb8cf391aca8c73cb30fd8eeda10b813d1f2a6c6df state_root=9ef63abe99c8302e58f3b5afad12ec68ee2d06e80f4ed7b8c68759a75785794c"
     );
 }
 

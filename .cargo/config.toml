@@ -1,0 +1,5 @@
+# where: repo-wide Cargo config
+# what: unify build artifacts under the workspace target directory
+# why: avoid per-crate target directories and reduce duplication
+[build]
+target-dir = "target"

@@ -1,5 +1,6 @@
 //! どこで: Phase1のREVM実行 / 何を: TxEnvの実行とcommit / なぜ: 状態更新をEVM経由にするため
 
+use crate::bytes::address_to_bytes;
 use crate::hash::keccak256;
 use crate::revm_db::RevmStableDb;
 use crate::tx_decode::DecodeError;
@@ -329,12 +330,6 @@ pub(crate) fn compute_effective_gas_price(
     let sum = base_fee.saturating_add(max_priority);
     let effective = if max_fee < sum { max_fee } else { sum };
     u64::try_from(effective).ok()
-}
-
-fn address_to_bytes(address: revm::primitives::Address) -> [u8; 20] {
-    let mut out = [0u8; 20];
-    out.copy_from_slice(address.as_ref());
-    out
 }
 
 fn revm_log_to_receipt_log(log: revm::primitives::Log) -> LogEntry {

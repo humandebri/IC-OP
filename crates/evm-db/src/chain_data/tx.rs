@@ -32,7 +32,7 @@ pub struct TxId(pub [u8; TX_ID_LEN]);
 
 impl Storable for TxId {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        match encode_guarded(b"tx_id_encode", self.0.to_vec(), TX_ID_LEN_U32) {
+        match encode_guarded(b"tx_id_encode", Cow::Borrowed(&self.0), TX_ID_LEN_U32) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; TX_ID_LEN_U32 as usize]),
         }
@@ -255,7 +255,11 @@ impl TryFrom<StoredTxBytes> for StoredTx {
 
 impl Storable for StoredTxBytes {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        match encode_guarded(b"stored_tx_encode", encode(self), STORED_TX_MAX_SIZE_U32) {
+        match encode_guarded(
+            b"stored_tx_encode",
+            Cow::Owned(encode(self)),
+            STORED_TX_MAX_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => Cow::Owned(encode_fallback_stored_tx()),
         }
@@ -384,7 +388,11 @@ fn encode(inner: &StoredTxBytes) -> Vec<u8> {
 fn encode_fallback_stored_tx() -> Vec<u8> {
     let invalid = invalid_stored_tx(0, &[]);
     let encoded = encode_minimal_stored_tx(&invalid);
-    match encode_guarded(b"stored_tx_encode", encoded, STORED_TX_MAX_SIZE_U32) {
+    match encode_guarded(
+        b"stored_tx_encode",
+        Cow::Owned(encoded),
+        STORED_TX_MAX_SIZE_U32,
+    ) {
         Ok(value) => value.into_owned(),
         // Fallback is intentionally invalid; empty bytes are forbidden.
         Err(_) => vec![STORED_TX_VERSION],
@@ -569,7 +577,7 @@ impl Storable for TxIndexEntry {
         let mut out = [0u8; 12];
         out[0..8].copy_from_slice(&self.block_number.to_be_bytes());
         out[8..12].copy_from_slice(&self.tx_index.to_be_bytes());
-        match encode_guarded(b"tx_index_encode", out.to_vec(), 12) {
+        match encode_guarded(b"tx_index_encode", Cow::Owned(out.to_vec()), 12) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; 12]),
         }

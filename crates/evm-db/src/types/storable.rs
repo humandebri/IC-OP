@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 impl Storable for AccountKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.0.to_vec())
+        Cow::Borrowed(&self.0)
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -39,7 +39,7 @@ impl Storable for AccountKey {
 
 impl Storable for StorageKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.0.to_vec())
+        Cow::Borrowed(&self.0)
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -65,7 +65,7 @@ impl Storable for StorageKey {
 
 impl Storable for CodeKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.0.to_vec())
+        Cow::Borrowed(&self.0)
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -91,7 +91,7 @@ impl Storable for CodeKey {
 
 impl Storable for AccountVal {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.0.to_vec())
+        Cow::Borrowed(&self.0)
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -117,7 +117,7 @@ impl Storable for AccountVal {
 
 impl Storable for U256Val {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.0.to_vec())
+        Cow::Borrowed(&self.0)
     }
 
     fn into_bytes(self) -> Vec<u8> {

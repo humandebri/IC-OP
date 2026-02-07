@@ -8,13 +8,13 @@ pub struct EncodeOverflow;
 
 pub fn encode_guarded<'a>(
     label: &'static [u8],
-    bytes: Vec<u8>,
+    bytes: Cow<'a, [u8]>,
     max_size: u32,
 ) -> Result<Cow<'a, [u8]>, EncodeOverflow> {
     if !ensure_encoded_within_bound(label, bytes.len(), max_size) {
         return Err(EncodeOverflow);
     }
-    Ok(Cow::Owned(bytes))
+    Ok(bytes)
 }
 
 pub fn ensure_encoded_within_bound(label: &'static [u8], encoded_len: usize, max_size: u32) -> bool {
@@ -28,5 +28,18 @@ pub fn mark_decode_failure(label: &'static [u8], fail_closed: bool) {
     record_corrupt(label);
     if fail_closed {
         crate::meta::set_needs_migration(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_guarded;
+    use std::borrow::Cow;
+
+    #[test]
+    fn encode_guarded_accepts_borrowed() {
+        let buf = [0x11u8; 4];
+        let encoded = encode_guarded(b"borrowed", Cow::Borrowed(&buf), 4).expect("encode_guarded");
+        assert_eq!(encoded.as_ref(), &buf);
     }
 }

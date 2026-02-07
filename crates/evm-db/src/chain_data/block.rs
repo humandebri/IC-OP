@@ -9,6 +9,8 @@ use crate::chain_data::tx::TxId;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::U64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockData {
@@ -60,7 +62,7 @@ impl Storable for BlockData {
         for tx_id in self.tx_ids.iter() {
             out.extend_from_slice(&tx_id.0);
         }
-        match encode_guarded(b"block_data_encode", out, MAX_BLOCK_DATA_SIZE_U32) {
+        match encode_guarded(b"block_data_encode", Cow::Owned(out), MAX_BLOCK_DATA_SIZE_U32) {
             Ok(value) => value,
             Err(_) => encode_fallback_block(),
         }
@@ -193,24 +195,40 @@ pub struct Head {
     pub timestamp: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct HeadWire {
+    number: U64,
+    block_hash: [u8; HASH_LEN],
+    timestamp: U64,
+}
+
+impl HeadWire {
+    fn new(head: &Head) -> Self {
+        Self {
+            number: U64::new(head.number),
+            block_hash: head.block_hash,
+            timestamp: U64::new(head.timestamp),
+        }
+    }
+}
+
 impl Storable for Head {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 8 + HASH_LEN + 8];
-        out[0..8].copy_from_slice(&self.number.to_be_bytes());
-        out[8..8 + HASH_LEN].copy_from_slice(&self.block_hash);
-        out[8 + HASH_LEN..8 + HASH_LEN + 8].copy_from_slice(&self.timestamp.to_be_bytes());
-        match encode_guarded(b"head_encode", out.to_vec(), 8 + HASH_LEN_U32 + 8) {
+        let wire = HeadWire::new(self);
+        match encode_guarded(
+            b"head_encode",
+            Cow::Owned(wire.as_bytes().to_vec()),
+            8 + HASH_LEN_U32 + 8,
+        ) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; (8 + HASH_LEN_U32 + 8) as usize]),
         }
     }
 
     fn into_bytes(self) -> Vec<u8> {
-        let mut out = [0u8; 8 + HASH_LEN + 8];
-        out[0..8].copy_from_slice(&self.number.to_be_bytes());
-        out[8..8 + HASH_LEN].copy_from_slice(&self.block_hash);
-        out[8 + HASH_LEN..8 + HASH_LEN + 8].copy_from_slice(&self.timestamp.to_be_bytes());
-        out.to_vec()
+        let wire = HeadWire::new(&self);
+        wire.as_bytes().to_vec()
     }
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
@@ -223,16 +241,21 @@ impl Storable for Head {
                 timestamp: 0,
             };
         }
-        let mut num = [0u8; 8];
-        num.copy_from_slice(&data[0..8]);
-        let mut hash = [0u8; HASH_LEN];
-        hash.copy_from_slice(&data[8..8 + HASH_LEN]);
-        let mut ts = [0u8; 8];
-        ts.copy_from_slice(&data[8 + HASH_LEN..8 + HASH_LEN + 8]);
+        let wire = match HeadWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_decode_failure(b"head", true);
+                return Head {
+                    number: 0,
+                    block_hash: [0u8; HASH_LEN],
+                    timestamp: 0,
+                };
+            }
+        };
         Self {
-            number: u64::from_be_bytes(num),
-            block_hash: hash,
-            timestamp: u64::from_be_bytes(ts),
+            number: wire.number.get(),
+            block_hash: wire.block_hash,
+            timestamp: wire.timestamp.get(),
         }
     }
 
@@ -263,7 +286,7 @@ fn encode_fallback_block() -> Cow<'static, [u8]> {
     out.extend_from_slice(&[0u8; HASH_LEN]);
     out.extend_from_slice(&[0u8; HASH_LEN]);
     out.extend_from_slice(&0u32.to_be_bytes());
-    match encode_guarded(b"block_data_encode", out, MAX_BLOCK_DATA_SIZE_U32) {
+    match encode_guarded(b"block_data_encode", Cow::Owned(out), MAX_BLOCK_DATA_SIZE_U32) {
         Ok(value) => value,
         Err(_) => Cow::Owned(vec![0u8; MAX_BLOCK_DATA_SIZE_U32 as usize]),
     }

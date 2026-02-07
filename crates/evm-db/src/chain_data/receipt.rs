@@ -41,7 +41,11 @@ impl Storable for ReceiptLike {
                 return encode_fallback_receipt();
             }
         };
-        match encode_guarded(b"receipt_encode", encoded, RECEIPT_MAX_SIZE_U32) {
+        match encode_guarded(
+            b"receipt_encode",
+            Cow::Owned(encoded),
+            RECEIPT_MAX_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => encode_fallback_receipt(),
         }
@@ -108,7 +112,14 @@ impl Storable for ReceiptLike {
             Some(value) => value,
             None => return corrupt_receipt(),
         };
-        let return_data = match read_vec(data, &mut offset, MAX_RETURN_DATA) {
+        let return_data_len = match read_u32(data, &mut offset) {
+            Some(value) => value,
+            None => return corrupt_receipt(),
+        };
+        if return_data_len as usize > MAX_RETURN_DATA {
+            return corrupt_receipt();
+        }
+        let return_data = match read_vec(data, &mut offset, return_data_len as usize) {
             Some(value) => value,
             None => return corrupt_receipt(),
         };
@@ -156,7 +167,14 @@ impl Storable for ReceiptLike {
                 };
                 topics.push(B256::from(topic));
             }
-            let data = match read_vec(data, &mut offset, MAX_LOG_DATA) {
+            let data_len = match read_u32(data, &mut offset) {
+                Some(value) => value,
+                None => return corrupt_receipt(),
+            };
+            if data_len as usize > MAX_LOG_DATA {
+                return corrupt_receipt();
+            }
+            let data = match read_vec(data, &mut offset, data_len as usize) {
                 Some(value) => value,
                 None => return corrupt_receipt(),
             };
@@ -288,7 +306,11 @@ fn encode_fallback_receipt() -> Cow<'static, [u8]> {
         out.extend_from_slice(&0u32.to_be_bytes());
         out
     });
-    match encode_guarded(b"receipt_encode", encoded, RECEIPT_MAX_SIZE_U32) {
+    match encode_guarded(
+        b"receipt_encode",
+        Cow::Owned(encoded),
+        RECEIPT_MAX_SIZE_U32,
+    ) {
         Ok(value) => value,
         Err(_) => Cow::Owned(vec![0u8; RECEIPT_MAX_SIZE_U32 as usize]),
     }

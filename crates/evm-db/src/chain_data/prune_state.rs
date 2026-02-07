@@ -7,6 +7,8 @@ use crate::chain_data::constants::MAX_TXS_PER_BLOCK_U32;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 const PRUNE_STATE_SIZE_U32: u32 = 32;
 const JOURNAL_NONE: u64 = u64::MAX;
@@ -19,6 +21,28 @@ pub struct PruneStateV1 {
     pub pruned_before_block: u64,
     pub next_prune_block: u64,
     pub journal_block_number: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct PruneStateWire {
+    schema_version: U32,
+    pruned_before_block: U64,
+    next_prune_block: U64,
+    journal_block_number: U64,
+    _pad0: [u8; 4],
+}
+
+impl PruneStateWire {
+    fn new(state: &PruneStateV1) -> Self {
+        Self {
+            schema_version: U32::new(state.schema_version),
+            pruned_before_block: U64::new(state.pruned_before_block),
+            next_prune_block: U64::new(state.next_prune_block),
+            journal_block_number: U64::new(state.journal_block_number),
+            _pad0: [0u8; 4],
+        }
+    }
 }
 
 impl PruneStateV1 {
@@ -68,12 +92,12 @@ impl Default for PruneStateV1 {
 
 impl Storable for PruneStateV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 32];
-        out[0..4].copy_from_slice(&self.schema_version.to_be_bytes());
-        out[4..12].copy_from_slice(&self.pruned_before_block.to_be_bytes());
-        out[12..20].copy_from_slice(&self.next_prune_block.to_be_bytes());
-        out[20..28].copy_from_slice(&self.journal_block_number.to_be_bytes());
-        match encode_guarded(b"prune_state", out.to_vec(), PRUNE_STATE_SIZE_U32) {
+        let wire = PruneStateWire::new(self);
+        match encode_guarded(
+            b"prune_state",
+            Cow::Owned(wire.as_bytes().to_vec()),
+            PRUNE_STATE_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; PRUNE_STATE_SIZE_U32 as usize]),
         }
@@ -89,19 +113,18 @@ impl Storable for PruneStateV1 {
             mark_decode_failure(b"prune_state", false);
             return PruneStateV1::new();
         }
-        let mut schema = [0u8; 4];
-        schema.copy_from_slice(&data[0..4]);
-        let mut pruned_before_block = [0u8; 8];
-        pruned_before_block.copy_from_slice(&data[4..12]);
-        let mut next_prune_block = [0u8; 8];
-        next_prune_block.copy_from_slice(&data[12..20]);
-        let mut journal_block_number = [0u8; 8];
-        journal_block_number.copy_from_slice(&data[20..28]);
+        let wire = match PruneStateWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_decode_failure(b"prune_state", false);
+                return PruneStateV1::new();
+            }
+        };
         Self {
-            schema_version: u32::from_be_bytes(schema),
-            pruned_before_block: u64::from_be_bytes(pruned_before_block),
-            next_prune_block: u64::from_be_bytes(next_prune_block),
-            journal_block_number: u64::from_be_bytes(journal_block_number),
+            schema_version: wire.schema_version.get(),
+            pruned_before_block: wire.pruned_before_block.get(),
+            next_prune_block: wire.next_prune_block.get(),
+            journal_block_number: wire.journal_block_number.get(),
         }
     }
 
@@ -135,7 +158,7 @@ impl Storable for PruneJournal {
             let bytes = ptr.to_bytes();
             out.extend_from_slice(&bytes);
         }
-        match encode_guarded(b"prune_journal", out, JOURNAL_MAX_SIZE_U32) {
+        match encode_guarded(b"prune_journal", Cow::Owned(out), JOURNAL_MAX_SIZE_U32) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; JOURNAL_MAX_SIZE_U32 as usize]),
         }
@@ -189,7 +212,7 @@ impl Storable for PruneJournal {
 fn encode_fallback_prune_journal() -> Cow<'static, [u8]> {
     let mut out = Vec::with_capacity(4);
     out.extend_from_slice(&0u32.to_be_bytes());
-    match encode_guarded(b"prune_journal", out, JOURNAL_MAX_SIZE_U32) {
+    match encode_guarded(b"prune_journal", Cow::Owned(out), JOURNAL_MAX_SIZE_U32) {
         Ok(value) => value,
         Err(_) => Cow::Owned(vec![0u8; JOURNAL_MAX_SIZE_U32 as usize]),
     }

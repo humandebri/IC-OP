@@ -4,6 +4,8 @@ use crate::corrupt_log::record_corrupt;
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobPtr {
@@ -13,23 +15,35 @@ pub struct BlobPtr {
     pub gen: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct BlobPtrWire {
+    offset: U64,
+    len: U32,
+    class: U32,
+    gen: U32,
+}
+
+impl BlobPtrWire {
+    fn new(ptr: &BlobPtr) -> Self {
+        Self {
+            offset: U64::new(ptr.offset),
+            len: U32::new(ptr.len),
+            class: U32::new(ptr.class),
+            gen: U32::new(ptr.gen),
+        }
+    }
+}
+
 impl Storable for BlobPtr {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 20];
-        out[0..8].copy_from_slice(&self.offset.to_be_bytes());
-        out[8..12].copy_from_slice(&self.len.to_be_bytes());
-        out[12..16].copy_from_slice(&self.class.to_be_bytes());
-        out[16..20].copy_from_slice(&self.gen.to_be_bytes());
-        Cow::Owned(out.to_vec())
+        let wire = BlobPtrWire::new(self);
+        Cow::Owned(wire.as_bytes().to_vec())
     }
 
     fn into_bytes(self) -> Vec<u8> {
-        let mut out = [0u8; 20];
-        out[0..8].copy_from_slice(&self.offset.to_be_bytes());
-        out[8..12].copy_from_slice(&self.len.to_be_bytes());
-        out[12..16].copy_from_slice(&self.class.to_be_bytes());
-        out[16..20].copy_from_slice(&self.gen.to_be_bytes());
-        out.to_vec()
+        let wire = BlobPtrWire::new(&self);
+        wire.as_bytes().to_vec()
     }
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
@@ -43,19 +57,23 @@ impl Storable for BlobPtr {
                 gen: 0,
             };
         }
-        let mut offset = [0u8; 8];
-        offset.copy_from_slice(&data[0..8]);
-        let mut len = [0u8; 4];
-        len.copy_from_slice(&data[8..12]);
-        let mut class = [0u8; 4];
-        class.copy_from_slice(&data[12..16]);
-        let mut gen = [0u8; 4];
-        gen.copy_from_slice(&data[16..20]);
+        let wire = match BlobPtrWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                record_corrupt(b"blob_ptr");
+                return Self {
+                    offset: 0,
+                    len: 0,
+                    class: 0,
+                    gen: 0,
+                };
+            }
+        };
         Self {
-            offset: u64::from_be_bytes(offset),
-            len: u32::from_be_bytes(len),
-            class: u32::from_be_bytes(class),
-            gen: u32::from_be_bytes(gen),
+            offset: wire.offset.get(),
+            len: wire.len.get(),
+            class: wire.class.get(),
+            gen: wire.gen.get(),
         }
     }
 

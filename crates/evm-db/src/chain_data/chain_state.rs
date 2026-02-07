@@ -8,6 +8,8 @@ use crate::chain_data::constants::{
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use zerocopy::byteorder::big_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChainStateV1 {
@@ -23,6 +25,40 @@ pub struct ChainStateV1 {
     pub base_fee: u64,
     pub min_gas_price: u64,
     pub min_priority_fee: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct ChainStateWire {
+    schema_version: U32,
+    chain_id: U64,
+    last_block_number: U64,
+    last_block_time: U64,
+    flags: u8,
+    _pad0: [u8; 3],
+    next_queue_seq: U64,
+    mining_interval_ms: U64,
+    base_fee: U64,
+    min_gas_price: U64,
+    min_priority_fee: U64,
+}
+
+impl ChainStateWire {
+    fn new(state: &ChainStateV1) -> Self {
+        Self {
+            schema_version: U32::new(state.schema_version),
+            chain_id: U64::new(state.chain_id),
+            last_block_number: U64::new(state.last_block_number),
+            last_block_time: U64::new(state.last_block_time),
+            flags: state.flags(),
+            _pad0: [0u8; 3],
+            next_queue_seq: U64::new(state.next_queue_seq),
+            mining_interval_ms: U64::new(state.mining_interval_ms),
+            base_fee: U64::new(state.base_fee),
+            min_gas_price: U64::new(state.min_gas_price),
+            min_priority_fee: U64::new(state.min_priority_fee),
+        }
+    }
 }
 
 impl ChainStateV1 {
@@ -66,18 +102,12 @@ impl ChainStateV1 {
 
 impl Storable for ChainStateV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        let mut out = [0u8; 72];
-        out[0..4].copy_from_slice(&self.schema_version.to_be_bytes());
-        out[4..12].copy_from_slice(&self.chain_id.to_be_bytes());
-        out[12..20].copy_from_slice(&self.last_block_number.to_be_bytes());
-        out[20..28].copy_from_slice(&self.last_block_time.to_be_bytes());
-        out[28] = self.flags();
-        out[32..40].copy_from_slice(&self.next_queue_seq.to_be_bytes());
-        out[40..48].copy_from_slice(&self.mining_interval_ms.to_be_bytes());
-        out[48..56].copy_from_slice(&self.base_fee.to_be_bytes());
-        out[56..64].copy_from_slice(&self.min_gas_price.to_be_bytes());
-        out[64..72].copy_from_slice(&self.min_priority_fee.to_be_bytes());
-        match encode_guarded(b"chain_state", out.to_vec(), CHAIN_STATE_SIZE_U32) {
+        let wire = ChainStateWire::new(self);
+        match encode_guarded(
+            b"chain_state",
+            Cow::Owned(wire.as_bytes().to_vec()),
+            CHAIN_STATE_SIZE_U32,
+        ) {
             Ok(value) => value,
             Err(_) => Cow::Owned(vec![0u8; CHAIN_STATE_SIZE_U32 as usize]),
         }
@@ -93,40 +123,28 @@ impl Storable for ChainStateV1 {
             mark_decode_failure(b"chain_state", false);
             return ChainStateV1::new(CHAIN_ID);
         }
-        let mut schema = [0u8; 4];
-        schema.copy_from_slice(&data[0..4]);
-        let mut chain_id = [0u8; 8];
-        chain_id.copy_from_slice(&data[4..12]);
-        let mut last_number = [0u8; 8];
-        last_number.copy_from_slice(&data[12..20]);
-        let mut last_time = [0u8; 8];
-        last_time.copy_from_slice(&data[20..28]);
-        let flags = data[28];
-        let mut next_queue_seq = [0u8; 8];
-        next_queue_seq.copy_from_slice(&data[32..40]);
-        let mut mining_interval_ms = [0u8; 8];
-        mining_interval_ms.copy_from_slice(&data[40..48]);
-        let mut base_fee = [0u8; 8];
-        base_fee.copy_from_slice(&data[48..56]);
-        let mut min_gas_price = [0u8; 8];
-        min_gas_price.copy_from_slice(&data[56..64]);
-        let mut min_priority_fee = [0u8; 8];
-        min_priority_fee.copy_from_slice(&data[64..72]);
+        let wire = match ChainStateWire::read_from_bytes(data) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_decode_failure(b"chain_state", false);
+                return ChainStateV1::new(CHAIN_ID);
+            }
+        };
         let mut state = Self {
-            schema_version: u32::from_be_bytes(schema),
-            chain_id: u64::from_be_bytes(chain_id),
-            last_block_number: u64::from_be_bytes(last_number),
-            last_block_time: u64::from_be_bytes(last_time),
+            schema_version: wire.schema_version.get(),
+            chain_id: wire.chain_id.get(),
+            last_block_number: wire.last_block_number.get(),
+            last_block_time: wire.last_block_time.get(),
             auto_mine_enabled: false,
             is_producing: false,
             mining_scheduled: false,
-            next_queue_seq: u64::from_be_bytes(next_queue_seq),
-            mining_interval_ms: u64::from_be_bytes(mining_interval_ms),
-            base_fee: u64::from_be_bytes(base_fee),
-            min_gas_price: u64::from_be_bytes(min_gas_price),
-            min_priority_fee: u64::from_be_bytes(min_priority_fee),
+            next_queue_seq: wire.next_queue_seq.get(),
+            mining_interval_ms: wire.mining_interval_ms.get(),
+            base_fee: wire.base_fee.get(),
+            min_gas_price: wire.min_gas_price.get(),
+            min_priority_fee: wire.min_priority_fee.get(),
         };
-        state.apply_flags(flags);
+        state.apply_flags(wire.flags);
         state
     }
 

@@ -22,8 +22,9 @@ use evm_db::chain_data::constants::{
 };
 use evm_db::chain_data::{
     BlockData, CallerKey, Head, InternalTraceSet, NativeCreditRecord, PendingFeeKey, PruneJournal,
-    PrunePolicy, ReadyKey, ReadySeqKey, ReceiptLike, SenderKey, SenderNonceKey, StoredTx,
-    StoredTxBytes, StoredTxError, TxId, TxIndexEntry, TxKind, TxLoc, TxLocKind,
+    PrunePolicy, PrunedMarkerBlockKey, ReadyKey, ReadySeqKey, ReceiptLike, SenderKey,
+    SenderNonceKey, StoredTx, StoredTxBytes, StoredTxError, TxId, TxIndexEntry, TxKind, TxLoc,
+    TxLocKind,
 };
 use evm_db::memory::{chain_data_memory_ids_for_estimate, memory_size_pages, WASM_PAGE_SIZE_BYTES};
 use evm_db::meta::tx_locs_v3_active;
@@ -250,6 +251,12 @@ pub struct PruneResult {
     pub pruned_before_block: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrunedMarkerCleanupResult {
+    removed: u64,
+    has_more: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallObjectInput {
     pub to: Option<[u8; 20]>,
@@ -373,6 +380,13 @@ pub fn clear_tx_locs_v3() {
     });
 }
 
+pub fn clear_pruned_marker_indexes() {
+    with_state_mut(|state| {
+        clear_stable_map(&mut state.pruned_marker_block_index);
+        clear_stable_map(&mut state.pruned_marker_eth_hash_by_tx_id);
+    });
+}
+
 pub fn migrate_tx_locs_batch(start_key: Option<TxId>, max_items: u32) -> (Option<TxId>, u64, bool) {
     use std::ops::Bound;
     with_state_mut(|state| {
@@ -391,6 +405,82 @@ pub fn migrate_tx_locs_batch(start_key: Option<TxId>, max_items: u32) -> (Option
                     let key = *entry.key();
                     state.tx_locs_v3.insert(key, entry.value());
                     last_key = Some(key);
+                    copied = verified_core::batch::increment_processed(copied);
+                }
+                None => {
+                    iterator_exhausted = true;
+                    break;
+                }
+            }
+        }
+        let done = verified_core::batch::batch_done(copied, max_items, iterator_exhausted);
+        (last_key, copied, done)
+    })
+}
+
+pub fn rebuild_pruned_marker_block_index_batch(
+    start_key: Option<TxId>,
+    max_items: u32,
+) -> (Option<TxId>, u64, bool) {
+    use std::ops::Bound;
+    with_state_mut(|state| {
+        let mut copied = 0u64;
+        let mut last_key = None;
+        let mut iter = match start_key {
+            Some(key) => state
+                .pruned_tx_locs
+                .range((Bound::Excluded(key), Bound::Unbounded)),
+            None => state.pruned_tx_locs.range(..),
+        };
+        let mut iterator_exhausted = false;
+        for _ in 0..max_items {
+            match iter.next() {
+                Some(entry) => {
+                    let tx_id = *entry.key();
+                    let loc = entry.value();
+                    if loc.kind == TxLocKind::Included && !loc.is_decode_failure_placeholder() {
+                        state
+                            .pruned_marker_block_index
+                            .insert(PrunedMarkerBlockKey::new(loc.block_number, tx_id.0), tx_id);
+                    }
+                    last_key = Some(tx_id);
+                    copied = verified_core::batch::increment_processed(copied);
+                }
+                None => {
+                    iterator_exhausted = true;
+                    break;
+                }
+            }
+        }
+        let done = verified_core::batch::batch_done(copied, max_items, iterator_exhausted);
+        (last_key, copied, done)
+    })
+}
+
+pub fn rebuild_pruned_marker_eth_hash_by_tx_id_batch(
+    start_key: Option<TxId>,
+    max_items: u32,
+) -> (Option<TxId>, u64, bool) {
+    use std::ops::Bound;
+    with_state_mut(|state| {
+        let mut copied = 0u64;
+        let mut last_key = None;
+        let mut iter = match start_key {
+            Some(key) => state
+                .pruned_eth_tx_hash_index
+                .range((Bound::Excluded(key), Bound::Unbounded)),
+            None => state.pruned_eth_tx_hash_index.range(..),
+        };
+        let mut iterator_exhausted = false;
+        for _ in 0..max_items {
+            match iter.next() {
+                Some(entry) => {
+                    let eth_hash = *entry.key();
+                    let tx_id = entry.value();
+                    state
+                        .pruned_marker_eth_hash_by_tx_id
+                        .insert(tx_id, eth_hash);
+                    last_key = Some(eth_hash);
                     copied = verified_core::batch::increment_processed(copied);
                 }
                 None => {
@@ -609,6 +699,9 @@ fn mark_pruned_receipt_status_marker(state: &mut StableState, tx_id: TxId) {
         return;
     }
     state.pruned_tx_locs.insert(tx_id, loc);
+    state
+        .pruned_marker_block_index
+        .insert(PrunedMarkerBlockKey::new(loc.block_number, tx_id.0), tx_id);
     let Some(envelope) = state.tx_store.get(&tx_id) else {
         return;
     };
@@ -618,9 +711,11 @@ fn mark_pruned_receipt_status_marker(state: &mut StableState, tx_id: TxId) {
     if stored.kind != TxKind::EthSigned {
         return;
     }
+    let eth_hash = TxId(hash::keccak256(&stored.raw));
+    state.pruned_eth_tx_hash_index.insert(eth_hash, tx_id);
     state
-        .pruned_eth_tx_hash_index
-        .insert(TxId(hash::keccak256(&stored.raw)), tx_id);
+        .pruned_marker_eth_hash_by_tx_id
+        .insert(tx_id, eth_hash);
 }
 
 fn tx_locs_insert(state: &mut StableState, tx_id: TxId, loc: TxLoc) {
@@ -2511,21 +2606,27 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
         let head_number = state.head.get().number;
         if head_number <= retain {
             let pruned_before = state.prune_state.get().pruned_before();
-            return Ok(PruneResult {
-                did_work: false,
-                remaining: 0,
-                pruned_before_block: pruned_before,
-            });
+            return Ok(finish_prune_result(
+                state,
+                retain,
+                u64::from(max_ops),
+                false,
+                0,
+                pruned_before,
+            ));
         }
         let prune_before = match verified_core::prune::prune_before_block(head_number, retain) {
             Some(value) => value,
             None => {
                 let pruned_before = state.prune_state.get().pruned_before();
-                return Ok(PruneResult {
-                    did_work: false,
-                    remaining: 0,
-                    pruned_before_block: pruned_before,
-                });
+                return Ok(finish_prune_result(
+                    state,
+                    retain,
+                    u64::from(max_ops),
+                    false,
+                    0,
+                    pruned_before,
+                ));
             }
         };
         let mut prune_state = *state.prune_state.get();
@@ -2595,12 +2696,126 @@ pub fn prune_blocks(retain: u64, max_ops: u32) -> Result<PruneResult, ChainError
         state.prune_state.set(prune_state);
         refresh_oldest(state);
         let remaining = verified_core::prune::remaining_blocks(next, prune_before);
-        Ok(PruneResult {
+        Ok(finish_prune_result(
+            state,
+            retain,
+            max_ops.saturating_sub(ops_used),
             did_work,
             remaining,
-            pruned_before_block: prune_state.pruned_before(),
-        })
+            prune_state.pruned_before(),
+        ))
     })
+}
+
+fn finish_prune_result(
+    state: &mut StableState,
+    retain_blocks: u64,
+    remaining_ops: u64,
+    did_work: bool,
+    remaining: u64,
+    pruned_before: Option<u64>,
+) -> PruneResult {
+    let cleanup = prune_old_pruned_markers(state, retain_blocks, pruned_before, remaining_ops);
+    PruneResult {
+        did_work: did_work || cleanup.removed > 0,
+        remaining: if remaining == 0 && cleanup.has_more {
+            1
+        } else {
+            remaining
+        },
+        pruned_before_block: pruned_before,
+    }
+}
+
+fn prune_old_pruned_markers(
+    state: &mut StableState,
+    retain_blocks: u64,
+    pruned_before: Option<u64>,
+    max_ops: u64,
+) -> PrunedMarkerCleanupResult {
+    use std::ops::Bound;
+    let Some(pruned_before) = pruned_before else {
+        return PrunedMarkerCleanupResult {
+            removed: 0,
+            has_more: false,
+        };
+    };
+    if retain_blocks == 0 || max_ops == 0 {
+        return PrunedMarkerCleanupResult {
+            removed: 0,
+            has_more: old_pruned_marker_exists(state, retain_blocks, pruned_before),
+        };
+    }
+    let Some(first_retained_marker_block) =
+        pruned_before.checked_sub(retain_blocks.saturating_sub(1))
+    else {
+        return PrunedMarkerCleanupResult {
+            removed: 0,
+            has_more: false,
+        };
+    };
+    if first_retained_marker_block == 0 {
+        return PrunedMarkerCleanupResult {
+            removed: 0,
+            has_more: false,
+        };
+    }
+    let upper = PrunedMarkerBlockKey::new(first_retained_marker_block, [0u8; 32]);
+    let mut removals = Vec::new();
+    let mut ops_used = 0u64;
+    let mut stopped_for_budget = false;
+    for entry in state
+        .pruned_marker_block_index
+        .range((Bound::Unbounded, Bound::Excluded(upper)))
+    {
+        let key = *entry.key();
+        let tx_id = entry.value();
+        let eth_hash = state.pruned_marker_eth_hash_by_tx_id.get(&tx_id);
+        let remove_ops = if eth_hash.is_some() { 4 } else { 3 };
+        if ops_used.saturating_add(remove_ops) > max_ops {
+            stopped_for_budget = true;
+            break;
+        }
+        ops_used = ops_used.saturating_add(remove_ops);
+        removals.push((key, eth_hash));
+    }
+    let mut removed = 0u64;
+    for (key, eth_hash) in removals {
+        let Some(tx_id) = state.pruned_marker_block_index.remove(&key) else {
+            continue;
+        };
+        state.pruned_tx_locs.remove(&tx_id);
+        state.pruned_marker_eth_hash_by_tx_id.remove(&tx_id);
+        if let Some(eth_hash) = eth_hash {
+            state.pruned_eth_tx_hash_index.remove(&eth_hash);
+        }
+        removed = removed.saturating_add(1);
+    }
+    let has_more = stopped_for_budget
+        || state
+            .pruned_marker_block_index
+            .range((Bound::Unbounded, Bound::Excluded(upper)))
+            .next()
+            .is_some();
+    PrunedMarkerCleanupResult { removed, has_more }
+}
+
+fn old_pruned_marker_exists(state: &StableState, retain_blocks: u64, pruned_before: u64) -> bool {
+    use std::ops::Bound;
+    let Some(first_retained_marker_block) =
+        pruned_before.checked_sub(retain_blocks.saturating_sub(1))
+    else {
+        return false;
+    };
+    if first_retained_marker_block == 0 {
+        return false;
+    }
+    let upper = PrunedMarkerBlockKey::new(first_retained_marker_block, [0u8; 32]);
+    state
+        .pruned_marker_block_index
+        .range((Bound::Unbounded, Bound::Excluded(upper)))
+        .next()
+        .is_some()
 }
 
 fn prune_ops_needed_for_block(

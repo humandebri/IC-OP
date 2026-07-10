@@ -178,6 +178,18 @@ pub struct IcpUpdateEnvelopeV1 {
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ResolveIcpUpdateRequestArgs {
+    pub request_id: Vec<u8>,
+    pub resolution: IcpUpdateResolutionView,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
+pub enum IcpUpdateResolutionView {
+    Dispatched { reply: Option<Vec<u8>> },
+    Failed { error: String },
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct FeePolicyArgs {
     pub fee_ledger_canister: Principal,
     pub cycle_fee_e8s: u64,
@@ -2358,29 +2370,94 @@ fn get_native_deposit_result(request_id: Vec<u8>) -> Option<RequestOverview> {
 fn get_icp_update_request(request_id: Vec<u8>) -> Option<IcpUpdateRequestView> {
     let request_id = tx_id_from_bytes(request_id)?;
     with_state(|state| {
-        state.icp_update_requests.get(&request_id).map(|req| {
-            let target = Principal::from_slice(&req.target);
-            IcpUpdateRequestView {
-                request_id: request_id.0.to_vec(),
-                tx_id: req.tx_id.0.to_vec(),
-                block_number: req.block_number,
-                tx_index: req.tx_index,
-                log_index: req.log_index,
-                tx_kind: tx_kind_to_icp_update_view(req.tx_kind),
-                evm_sender: req.evm_sender.to_vec(),
-                ic_caller: req
-                    .ic_caller
-                    .as_ref()
-                    .map(|bytes| Principal::from_slice(bytes)),
-                target,
-                method: req.method,
-                status: icp_update_request_status_to_view(req.status),
-                reply: req.reply,
-                error: req.error_code,
-                updated_at: req.updated_at,
-            }
-        })
+        state
+            .icp_update_requests
+            .get(&request_id)
+            .map(icp_update_request_to_view)
     })
+}
+
+#[ic_cdk::update]
+fn resolve_icp_update_request(
+    args: ResolveIcpUpdateRequestArgs,
+) -> Result<IcpUpdateRequestView, ApiError> {
+    if let Some(reason) = reject_anonymous_update() {
+        return Err(api_rejected(&reason, &reason));
+    }
+    require_control_plane_write().map_err(|err| api_rejected(&err, &err))?;
+    let request_id = tx_id_from_bytes(args.request_id)
+        .ok_or_else(|| api_invalid_argument("arg.request_id_invalid", "arg.request_id_invalid"))?;
+    let now = current_time_nanos();
+    resolve_icp_update_request_internal(request_id, args.resolution, now)
+}
+
+fn resolve_icp_update_request_internal(
+    request_id: TxId,
+    resolution: IcpUpdateResolutionView,
+    now: u64,
+) -> Result<IcpUpdateRequestView, ApiError> {
+    with_state_mut(|state| {
+        let Some(mut req) = state.icp_update_requests.get(&request_id) else {
+            return Err(api_rejected("request.not_found", "request.not_found"));
+        };
+        match req.status {
+            IcpUpdateRequestStatus::DispatchFailed | IcpUpdateRequestStatus::DispatchUncertain => {}
+            _ => {
+                return Err(api_rejected(
+                    "request.status_not_resolvable",
+                    "request.status_not_resolvable",
+                ));
+            }
+        }
+        match resolution {
+            IcpUpdateResolutionView::Dispatched { reply } => {
+                if reply
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.len() > MAX_RETURN_DATA)
+                {
+                    return Err(api_invalid_argument(
+                        "arg.reply_too_large",
+                        "arg.reply_too_large",
+                    ));
+                }
+                req.status = IcpUpdateRequestStatus::Dispatched;
+                req.reply = reply;
+                req.error_code = None;
+            }
+            IcpUpdateResolutionView::Failed { error } => {
+                req.status = IcpUpdateRequestStatus::DispatchFailed;
+                req.reply = None;
+                req.error_code = Some(clamp_error_code(error));
+            }
+        }
+        req.updated_at = now;
+        store_icp_update_request(state, request_id, req.clone());
+        trim_icp_update_requests(state);
+        Ok(icp_update_request_to_view(req))
+    })
+}
+
+fn icp_update_request_to_view(req: IcpUpdateDispatchRequest) -> IcpUpdateRequestView {
+    let target = Principal::from_slice(&req.target);
+    IcpUpdateRequestView {
+        request_id: req.request_id.0.to_vec(),
+        tx_id: req.tx_id.0.to_vec(),
+        block_number: req.block_number,
+        tx_index: req.tx_index,
+        log_index: req.log_index,
+        tx_kind: tx_kind_to_icp_update_view(req.tx_kind),
+        evm_sender: req.evm_sender.to_vec(),
+        ic_caller: req
+            .ic_caller
+            .as_ref()
+            .map(|bytes| Principal::from_slice(bytes)),
+        target,
+        method: req.method,
+        status: icp_update_request_status_to_view(req.status),
+        reply: req.reply,
+        error: req.error_code,
+        updated_at: req.updated_at,
+    }
 }
 
 #[ic_cdk::update]
@@ -3156,6 +3233,10 @@ const INSPECT_METHOD_POLICIES: &[InspectMethodPolicy] = &[
         payload_limit: INSPECT_MANAGE_PAYLOAD_LIMIT,
     },
     InspectMethodPolicy {
+        method: "resolve_icp_update_request",
+        payload_limit: INSPECT_MANAGE_PAYLOAD_LIMIT,
+    },
+    InspectMethodPolicy {
         method: "set_allowed_assets",
         payload_limit: INSPECT_MANAGE_PAYLOAD_LIMIT,
     },
@@ -3622,6 +3703,18 @@ fn set_prune_policy(policy: PrunePolicyView) -> Result<(), String> {
 }
 
 fn validate_prune_policy_input(policy: &PrunePolicyView) -> Result<(), String> {
+    if policy.target_bytes == 0 {
+        return Err("input.prune.target_bytes.zero".to_string());
+    }
+    if policy.retain_blocks == 0 && policy.retain_days == 0 {
+        return Err("input.prune.retention.empty".to_string());
+    }
+    if policy.headroom_ratio_bps > 10_000 || policy.hard_emergency_ratio_bps > 10_000 {
+        return Err("input.prune.ratio.out_of_range".to_string());
+    }
+    if policy.headroom_ratio_bps >= policy.hard_emergency_ratio_bps {
+        return Err("input.prune.ratio.order".to_string());
+    }
     if policy.max_ops_per_tick < MIN_PRUNE_MAX_OPS_PER_TICK {
         return Err("input.prune.max_ops_per_tick.non_positive".to_string());
     }
@@ -4387,6 +4480,11 @@ fn schema_migration_tick(max_steps: u32) -> bool {
                     state.cursor_key_set = false;
                     state.cursor_key = [0u8; 32];
                 }
+                if state.from_version < 8 {
+                    chain::clear_pruned_marker_indexes();
+                    state.cursor_key_set = false;
+                    state.cursor_key = [0u8; 32];
+                }
                 state.phase = SchemaMigrationPhase::Scan;
                 state.cursor = 0;
                 set_schema_migration_state(state);
@@ -4418,16 +4516,98 @@ fn schema_migration_tick(max_steps: u32) -> bool {
                     state.cursor_key = [0u8; 32];
                     set_schema_migration_state(state);
                 }
-                if state.from_version < 7 {
-                    let active = evm_db::stable_state::with_state_mut(|stable| {
-                        rebuild_icp_update_active_count(stable)
-                    });
-                    state.cursor = active;
-                    set_schema_migration_state(state);
-                }
-                state.phase = SchemaMigrationPhase::Verify;
-                state.cursor = 0;
+                let active = evm_db::stable_state::with_state_mut(|stable| {
+                    rebuild_icp_update_active_count(stable)
+                });
+                state.cursor = active;
                 set_schema_migration_state(state);
+                state.phase = if state.from_version < 8 {
+                    SchemaMigrationPhase::PrunedMarkerBlockIndex
+                } else if !evm_db::meta::tx_locs_v3_active() {
+                    SchemaMigrationPhase::TxLocsV3
+                } else {
+                    SchemaMigrationPhase::Verify
+                };
+                state.cursor = 0;
+                state.cursor_key_set = false;
+                state.cursor_key = [0u8; 32];
+                set_schema_migration_state(state);
+            }
+            SchemaMigrationPhase::PrunedMarkerBlockIndex => {
+                let start_key = if state.cursor_key_set {
+                    Some(TxId(state.cursor_key))
+                } else {
+                    None
+                };
+                let (last_key, rebuilt, done) =
+                    chain::rebuild_pruned_marker_block_index_batch(start_key, 512);
+                state.cursor = state.cursor.saturating_add(rebuilt);
+                if let Some(key) = last_key {
+                    state.cursor_key_set = true;
+                    state.cursor_key = key.0;
+                }
+                if done {
+                    state.phase = SchemaMigrationPhase::PrunedMarkerEthHashIndex;
+                    state.cursor = 0;
+                    state.cursor_key_set = false;
+                    state.cursor_key = [0u8; 32];
+                }
+                set_schema_migration_state(state);
+                if !done {
+                    return false;
+                }
+            }
+            SchemaMigrationPhase::PrunedMarkerEthHashIndex => {
+                let start_key = if state.cursor_key_set {
+                    Some(TxId(state.cursor_key))
+                } else {
+                    None
+                };
+                let (last_key, rebuilt, done) =
+                    chain::rebuild_pruned_marker_eth_hash_by_tx_id_batch(start_key, 512);
+                state.cursor = state.cursor.saturating_add(rebuilt);
+                if let Some(key) = last_key {
+                    state.cursor_key_set = true;
+                    state.cursor_key = key.0;
+                }
+                if done {
+                    state.phase = if !evm_db::meta::tx_locs_v3_active() {
+                        SchemaMigrationPhase::TxLocsV3
+                    } else {
+                        SchemaMigrationPhase::Verify
+                    };
+                    state.cursor = 0;
+                    state.cursor_key_set = false;
+                    state.cursor_key = [0u8; 32];
+                }
+                set_schema_migration_state(state);
+                if !done {
+                    return false;
+                }
+            }
+            SchemaMigrationPhase::TxLocsV3 => {
+                let start_key = if state.cursor_key_set {
+                    Some(TxId(state.cursor_key))
+                } else {
+                    None
+                };
+                let (last_key, copied, done) = chain::migrate_tx_locs_batch(start_key, 512);
+                state.cursor = state.cursor.saturating_add(copied);
+                if let Some(key) = last_key {
+                    state.cursor_key_set = true;
+                    state.cursor_key = key.0;
+                }
+                if done {
+                    set_tx_locs_v3_active(true);
+                    state.phase = SchemaMigrationPhase::Verify;
+                    state.cursor = 0;
+                    state.cursor_key_set = false;
+                    state.cursor_key = [0u8; 32];
+                }
+                set_schema_migration_state(state);
+                if !done {
+                    return false;
+                }
             }
             SchemaMigrationPhase::Verify => {
                 if !evm_db::meta::tx_locs_v3_active() {
@@ -4684,9 +4864,6 @@ fn apply_post_upgrade_migrations() {
     let from = meta.schema_version;
     if from < current {
         sync_chain_runtime_defaults_for_schema_upgrade();
-    }
-    if from >= 3 && !evm_db::meta::tx_locs_v3_active() {
-        set_tx_locs_v3_active(true);
     }
     let state_root_pending = with_state(|state| {
         !state.state_root_meta.get().initialized
@@ -6147,7 +6324,10 @@ ic_cdk::export_candid!();
 // NOTE: build-time only; keep out of production surface area.
 #[cfg(feature = "did-gen")]
 pub fn export_did() -> String {
-    __export_service()
+    __export_service().replace(
+        "tx_kind : TxKindView;\n  reply : opt blob;\n};\ntype IcpUpdateResolutionView",
+        "tx_kind : IcpUpdateTxKindView;\n  reply : opt blob;\n};\ntype IcpUpdateResolutionView",
+    )
 }
 
 #[cfg(test)]

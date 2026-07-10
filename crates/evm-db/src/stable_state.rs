@@ -7,9 +7,10 @@ use crate::chain_data::{
     CallerKey, ChainStateV1, DroppedRingStateV1, FeePolicyStored, GcStateV1, HashKey, Head,
     IcpUpdateDispatchRequest, LogConfigV1, MetricsStateV1, MigrationStateV1, MismatchRecordV1,
     NativeCreditRecord, NodeRecord, OpsConfigV1, OpsMetricsV1, OpsStateV1, PendingFeeKey,
-    PruneConfigV1, PruneJournal, PruneStateV1, QueueMeta, ReadyKey, ReadySeqKey, RuntimeConfigV1,
-    SenderKey, SenderNonceKey, StateRootMetaV1, StateRootMetricsV1, StoredTxBytes, TxId,
-    UnwrapDispatchRequest, WrapEvmConfigStored, WrapPendingSubmission, WrapStoredRequest,
+    PruneConfigV1, PruneJournal, PruneStateV1, PrunedMarkerBlockKey, QueueMeta, ReadyKey,
+    ReadySeqKey, RuntimeConfigV1, SenderKey, SenderNonceKey, StateRootMetaV1, StateRootMetricsV1,
+    StoredTxBytes, TxId, UnwrapDispatchRequest, WrapEvmConfigStored, WrapPendingSubmission,
+    WrapStoredRequest,
 };
 use crate::memory::{get_memory, AppMemoryId, VMem};
 use crate::types::keys::{AccountKey, CodeKey, StorageKey};
@@ -43,6 +44,8 @@ pub type ReadyBySeq = StableBTreeMap<ReadySeqKey, TxId, VMem>;
 pub type EthTxHashIndex = StableBTreeMap<TxId, TxId, VMem>;
 pub type PrunedTxLocs = StableBTreeMap<TxId, crate::chain_data::TxLoc, VMem>;
 pub type PrunedEthTxHashIndex = StableBTreeMap<TxId, TxId, VMem>;
+pub type PrunedMarkerBlockIndex = StableBTreeMap<PrunedMarkerBlockKey, TxId, VMem>;
+pub type PrunedMarkerEthHashByTxId = StableBTreeMap<TxId, TxId, VMem>;
 pub type UnwrapRequests = StableBTreeMap<TxId, UnwrapDispatchRequest, VMem>;
 pub type UnwrapDispatchQueue = StableBTreeMap<u64, TxId, VMem>;
 pub type WrapRequests = StableBTreeMap<TxId, WrapStoredRequest, VMem>;
@@ -102,6 +105,8 @@ pub struct StableState {
     pub eth_tx_hash_index: EthTxHashIndex,
     pub pruned_tx_locs: PrunedTxLocs,
     pub pruned_eth_tx_hash_index: PrunedEthTxHashIndex,
+    pub pruned_marker_block_index: PrunedMarkerBlockIndex,
+    pub pruned_marker_eth_hash_by_tx_id: PrunedMarkerEthHashByTxId,
     pub unwrap_requests: UnwrapRequests,
     pub unwrap_dispatch_queue: UnwrapDispatchQueue,
     pub unwrap_dispatch_meta: StableCell<QueueMeta, VMem>,
@@ -209,6 +214,10 @@ pub fn init_stable_state() {
     let pruned_tx_locs = StableBTreeMap::init(get_memory(AppMemoryId::PrunedTxLocs));
     let pruned_eth_tx_hash_index =
         StableBTreeMap::init(get_memory(AppMemoryId::PrunedEthTxHashIndex));
+    let pruned_marker_block_index =
+        StableBTreeMap::init(get_memory(AppMemoryId::PrunedMarkerBlockIndex));
+    let pruned_marker_eth_hash_by_tx_id =
+        StableBTreeMap::init(get_memory(AppMemoryId::PrunedMarkerEthHashByTxId));
     let unwrap_requests = StableBTreeMap::init(get_memory(AppMemoryId::UnwrapRequests));
     let unwrap_dispatch_queue = StableBTreeMap::init(get_memory(AppMemoryId::UnwrapDispatchQueue));
     let unwrap_dispatch_meta = StableCell::init(
@@ -325,6 +334,8 @@ pub fn init_stable_state() {
             eth_tx_hash_index,
             pruned_tx_locs,
             pruned_eth_tx_hash_index,
+            pruned_marker_block_index,
+            pruned_marker_eth_hash_by_tx_id,
             unwrap_requests,
             unwrap_dispatch_queue,
             unwrap_dispatch_meta,

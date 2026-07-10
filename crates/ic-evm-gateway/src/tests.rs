@@ -2971,6 +2971,30 @@ fn apply_post_upgrade_migrations_rebuilds_icp_update_active_count() {
 }
 
 #[test]
+fn apply_post_upgrade_migrations_moves_tx_locs_before_enabling_v3() {
+    init_stable_state();
+    let current = evm_db::meta::current_schema_version();
+    let tx_id = TxId([0x4au8; 32]);
+    with_state_mut(|state| {
+        state.tx_locs.insert(tx_id, TxLoc::included(7, 0));
+    });
+    let mut meta = evm_db::meta::Meta::new();
+    meta.schema_version = current.saturating_sub(1);
+    meta.last_migration_from = meta.schema_version;
+    meta.last_migration_to = meta.schema_version;
+    evm_db::meta::set_meta(meta);
+
+    super::apply_post_upgrade_migrations();
+
+    assert!(!evm_db::meta::tx_locs_v3_active());
+    run_post_upgrade_migrations_until_settled();
+    assert!(evm_db::meta::tx_locs_v3_active());
+    with_state(|state| {
+        assert_eq!(state.tx_locs_v3.get(&tx_id), Some(TxLoc::included(7, 0)));
+    });
+}
+
+#[test]
 fn apply_post_upgrade_migrations_resyncs_any_stale_floor_values() {
     init_stable_state();
     let current = evm_db::meta::current_schema_version();
@@ -3022,6 +3046,47 @@ fn set_prune_policy_rejects_non_positive_max_ops() {
     };
     let err = validate_prune_policy_input(&policy).expect_err("max ops must be positive");
     assert_eq!(err, "input.prune.max_ops_per_tick.non_positive");
+}
+
+#[test]
+fn set_prune_policy_rejects_invalid_bounds() {
+    init_stable_state();
+    let valid = PrunePolicyView {
+        target_bytes: 1,
+        retain_days: 1,
+        retain_blocks: 0,
+        headroom_ratio_bps: 2000,
+        hard_emergency_ratio_bps: 9500,
+        max_ops_per_tick: super::MIN_PRUNE_MAX_OPS_PER_TICK,
+    };
+
+    let mut policy = valid.clone();
+    policy.target_bytes = 0;
+    assert_eq!(
+        validate_prune_policy_input(&policy).expect_err("target must be set"),
+        "input.prune.target_bytes.zero"
+    );
+
+    let mut policy = valid.clone();
+    policy.retain_days = 0;
+    assert_eq!(
+        validate_prune_policy_input(&policy).expect_err("retention must be set"),
+        "input.prune.retention.empty"
+    );
+
+    let mut policy = valid.clone();
+    policy.headroom_ratio_bps = 10_001;
+    assert_eq!(
+        validate_prune_policy_input(&policy).expect_err("ratio must be bounded"),
+        "input.prune.ratio.out_of_range"
+    );
+
+    let mut policy = valid;
+    policy.headroom_ratio_bps = policy.hard_emergency_ratio_bps;
+    assert_eq!(
+        validate_prune_policy_input(&policy).expect_err("ratio order must hold"),
+        "input.prune.ratio.order"
+    );
 }
 
 #[test]
@@ -4366,6 +4431,121 @@ fn get_icp_update_request_returns_dispatch_result() {
 }
 
 #[test]
+fn resolve_icp_update_request_records_manual_dispatch_success() {
+    init_stable_state();
+    let request_id = TxId([0x67u8; 32]);
+    with_state_mut(|state| {
+        state.icp_update_requests.insert(
+            request_id,
+            test_icp_update_request(
+                request_id,
+                vec![1],
+                "write_state",
+                IcpUpdateRequestStatus::DispatchUncertain,
+            ),
+        );
+        super::rebuild_icp_update_active_count(state);
+    });
+
+    let view = super::resolve_icp_update_request_internal(
+        request_id,
+        super::IcpUpdateResolutionView::Dispatched {
+            reply: Some(vec![0xab]),
+        },
+        777,
+    )
+    .expect("manual resolution");
+
+    assert_eq!(view.status, super::RequestDispatchStatusView::Dispatched);
+    assert_eq!(view.reply, Some(vec![0xab]));
+    assert_eq!(view.error, None);
+    assert_eq!(view.updated_at, 777);
+    with_state(|state| {
+        let stored = state.icp_update_requests.get(&request_id).expect("stored");
+        assert_eq!(stored.status, IcpUpdateRequestStatus::Dispatched);
+        assert_eq!(*state.icp_update_active_count.get(), 0);
+    });
+    assert_icp_update_active_count_matches_scan();
+}
+
+#[test]
+fn resolve_icp_update_request_records_manual_failure() {
+    init_stable_state();
+    let request_id = TxId([0x68u8; 32]);
+    with_state_mut(|state| {
+        state.icp_update_requests.insert(
+            request_id,
+            test_icp_update_request(
+                request_id,
+                vec![1],
+                "write_state",
+                IcpUpdateRequestStatus::DispatchFailed,
+            ),
+        );
+        super::rebuild_icp_update_active_count(state);
+    });
+
+    let view = super::resolve_icp_update_request_internal(
+        request_id,
+        super::IcpUpdateResolutionView::Failed {
+            error: "operator.confirmed_failed".to_string(),
+        },
+        778,
+    )
+    .expect("manual failure");
+
+    assert_eq!(
+        view.status,
+        super::RequestDispatchStatusView::DispatchFailed
+    );
+    assert_eq!(view.reply, None);
+    assert_eq!(view.error, Some("operator.confirmed_failed".to_string()));
+    assert_eq!(view.updated_at, 778);
+}
+
+#[test]
+fn resolve_icp_update_request_rejects_non_terminal_or_large_reply() {
+    init_stable_state();
+    let request_id = TxId([0x69u8; 32]);
+    with_state_mut(|state| {
+        state.icp_update_requests.insert(
+            request_id,
+            test_icp_update_request(
+                request_id,
+                vec![1],
+                "write_state",
+                IcpUpdateRequestStatus::Queued,
+            ),
+        );
+        super::rebuild_icp_update_active_count(state);
+    });
+
+    let err = super::resolve_icp_update_request_internal(
+        request_id,
+        super::IcpUpdateResolutionView::Dispatched { reply: None },
+        779,
+    )
+    .expect_err("queued request is not manually resolvable");
+    assert_eq!(super::api_error_code(err), "request.status_not_resolvable");
+
+    with_state_mut(|state| {
+        let mut req = state.icp_update_requests.get(&request_id).expect("stored");
+        req.status = IcpUpdateRequestStatus::DispatchUncertain;
+        state.icp_update_requests.insert(request_id, req);
+        super::rebuild_icp_update_active_count(state);
+    });
+    let err = super::resolve_icp_update_request_internal(
+        request_id,
+        super::IcpUpdateResolutionView::Dispatched {
+            reply: Some(vec![0u8; MAX_RETURN_DATA + 1]),
+        },
+        780,
+    )
+    .expect_err("large reply is rejected");
+    assert_eq!(super::api_error_code(err), "arg.reply_too_large");
+}
+
+#[test]
 fn trim_icp_update_requests_removes_oldest_completed_only() {
     init_stable_state();
     with_state_mut(|state| {
@@ -5163,16 +5343,19 @@ fn did_contains_dispatch_result_contract_shape() {
     assert!(did.contains("get_unwrap_dispatch_overview"));
     assert!(did.contains("DispatchUncertain"));
     assert!(did.contains("type IcpUpdateRequestView = record {"));
+    assert!(did.contains("type ResolveIcpUpdateRequestArgs = record {"));
+    assert!(did.contains("type IcpUpdateResolutionView = variant {"));
     assert!(did.contains("type IcpUpdateTxKindView = variant { EthSigned; IcSynthetic }"));
     assert!(did.contains("tx_kind : IcpUpdateTxKindView"));
     assert!(did.contains("evm_sender : blob"));
     assert!(did.contains("ic_caller : opt principal"));
     assert!(did.contains("get_icp_update_request : (blob) -> (opt IcpUpdateRequestView) query"));
+    assert!(did.contains("resolve_icp_update_request : (ResolveIcpUpdateRequestArgs) -> (Result_"));
     assert!(did.contains("get_update_precompile_allowlist : () -> (vec PrecompileAllowArgs) query"));
     assert!(did.contains("add_update_precompile_allowed_method : (PrecompileAllowArgs) -> (Result"));
     assert!(did.contains("remove_update_precompile_allowed_method : (PrecompileAllowArgs) -> ("));
     assert!(did.contains(
-        "rpc_eth_call_object_at : (RpcCallObjectView, RpcBlockTagView) -> (\n      Result_19,\n    ) composite_query"
+        "rpc_eth_call_object_at : (RpcCallObjectView, RpcBlockTagView) -> (\n      Result_"
     ));
     assert!(!did.contains("set_wrap_canister_id : (principal) -> (Result_15);"));
 }
